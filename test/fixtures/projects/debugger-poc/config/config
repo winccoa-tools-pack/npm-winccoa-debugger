@@ -1,0 +1,18 @@
+[general]
+pvss_path = "<WinCC_OA_PATH>"
+proj_path = "<WinCC_OA_PATH>/TestFramework_<WinCC_OA_VERSION>"
+proj_version = "<WinCC_OA_VERSION>"
+
+distributed = 0
+distPeer = ""
+redundant = 0
+split = 0
+eventMan = 1
+data = 0
+
+lang = "en_US.utf8"
+langs = "en_US.utf8"
+
+[ctrl]
+# Enable CTRL debugging
+loadCtrlLibs = 1

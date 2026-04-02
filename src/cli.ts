@@ -1,148 +1,155 @@
 #!/usr/bin/env node
 /**
- * WinCC OA Debug Adapter CLI
- * 
- * Command-line interface for running the debug adapter as a standalone process.
- * This is used when VS Code communicates with the debug adapter via stdio or socket.
+ * CLI for WinCC OA Debug Adapter
  * 
  * Usage:
- *   winccoa-debug-adapter [options]
- * 
- * Options:
- *   --server <port>     Listen on TCP port instead of stdio
- *   --log <level>       Set log level (error, warn, info, debug, trace)
- *   --help              Show this help message
+ *   winccoa-debug-adapter --host localhost --port 4999 --system System1 --manager ctrl:1
+ *   winccoa-debug-adapter --stdio   # Run as DAP server on stdin/stdout
  */
 
-import { WinCCDebugSession } from './adapter/WinCCDebugSession.js';
-import { LogLevel, logger } from './utils/Logger.js';
+import { DatapointClient, DatapointConfig } from './connection/DatapointClient';
 
-/**
- * Parse command line arguments
- */
-function parseArgs(): {
-  server?: number;
-  logLevel: LogLevel;
-  help: boolean;
-} {
-  const args = process.argv.slice(2);
-  const result = {
-    server: undefined as number | undefined,
-    logLevel: LogLevel.INFO,
-    help: false,
-  };
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    switch (arg) {
-      case '--server':
-        result.server = parseInt(args[++i], 10);
-        break;
-
-      case '--log':
-        const level = args[++i].toLowerCase();
-        switch (level) {
-          case 'error': result.logLevel = LogLevel.ERROR; break;
-          case 'warn': result.logLevel = LogLevel.WARN; break;
-          case 'info': result.logLevel = LogLevel.INFO; break;
-          case 'debug': result.logLevel = LogLevel.DEBUG; break;
-          case 'trace': result.logLevel = LogLevel.TRACE; break;
-          default:
-            console.error(`Unknown log level: ${level}`);
-            process.exit(1);
-        }
-        break;
-
-      case '--help':
-      case '-h':
-        result.help = true;
-        break;
-
-      default:
-        console.error(`Unknown option: ${arg}`);
-        process.exit(1);
-    }
-  }
-
-  return result;
+interface CLIArgs {
+    host?: string;
+    port?: number;
+    system?: string;
+    manager?: string; // Format: "ctrl:1" or "ui:5"
+    stdio?: boolean;
 }
 
-/**
- * Show help message
- */
-function showHelp(): void {
-  console.log(`
+function parseArgs(args: string[]): CLIArgs {
+    const result: CLIArgs = {};
+    
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        
+        switch (arg) {
+            case '--host':
+                result.host = args[++i];
+                break;
+            case '--port':
+                result.port = parseInt(args[++i], 10);
+                break;
+            case '--system':
+                result.system = args[++i];
+                break;
+            case '--manager':
+                result.manager = args[++i];
+                break;
+            case '--stdio':
+                result.stdio = true;
+                break;
+            case '--help':
+            case '-h':
+                printUsage();
+                process.exit(0);
+        }
+    }
+    
+    return result;
+}
+
+function printUsage() {
+    console.log(`
 WinCC OA Debug Adapter
 
 Usage:
   winccoa-debug-adapter [options]
 
 Options:
-  --server <port>     Listen on TCP port instead of stdio
-  --log <level>       Set log level (error, warn, info, debug, trace)
-  --help, -h          Show this help message
+  --host <host>        WinCC OA host (default: localhost)
+  --port <port>        WinCC OA dist port (default: 4999)
+  --system <system>    WinCC OA system name (default: System1)
+  --manager <type:num> Manager to debug (e.g., ctrl:1, ui:5)
+  --stdio              Run as DAP server on stdin/stdout
+  --help, -h           Show this help
 
 Examples:
-  # Run with stdio (default for VS Code)
-  winccoa-debug-adapter
+  # Test connection to CTRL manager 1
+  winccoa-debug-adapter --host localhost --port 4999 --system System1 --manager ctrl:1
 
-  # Run on TCP port
-  winccoa-debug-adapter --server 4711
-
-  # Debug mode
-  winccoa-debug-adapter --log debug
+  # Run as DAP server
+  winccoa-debug-adapter --stdio
 `);
 }
 
-/**
- * Main entry point
- */
-function main(): void {
-  const args = parseArgs();
-
-  if (args.help) {
-    showHelp();
-    return;
-  }
-
-  // Set log level
-  logger.setLevel(args.logLevel);
-
-  logger.info('Starting WinCC OA Debug Adapter');
-  logger.info(`Log level: ${LogLevel[args.logLevel]}`);
-
-  // Create debug session
-  const session = new WinCCDebugSession();
-
-  if (args.server !== undefined) {
-    // Server mode (TCP)
-    logger.info(`Listening on port ${args.server}`);
-    session.start(process.stdin, process.stdout);
-    // TODO: Implement TCP server mode
-  } else {
-    // Stdio mode (default)
-    logger.info('Using stdio communication');
-    session.start(process.stdin, process.stdout);
-  }
-
-  // Handle process signals
-  process.on('SIGTERM', () => {
-    logger.info('Received SIGTERM, shutting down');
-    session.shutdown();
-    process.exit(0);
-  });
-
-  process.on('SIGINT', () => {
-    logger.info('Received SIGINT, shutting down');
-    session.shutdown();
-    process.exit(0);
-  });
+async function runInteractiveMode(config: DatapointConfig) {
+    console.log('WinCC OA Debug Adapter - Interactive Mode');
+    console.log('Connecting to:', config);
+    
+    const client = new DatapointClient(config);
+    
+    client.on('connected', () => {
+        console.log('✓ Connected to WinCC OA');
+        console.log('  Debug datapoint:', client.getDebugDp());
+    });
+    
+    client.on('disconnected', () => {
+        console.log('✗ Disconnected from WinCC OA');
+    });
+    
+    client.on('error', (err) => {
+        console.error('Error:', err.message);
+    });
+    
+    client.on('message', (msg) => {
+        console.log('Unsolicited message:', msg);
+    });
+    
+    try {
+        await client.connect();
+        
+        // Simple test: query threads
+        console.log('\nSending test command: info threads');
+        const result = await client.sendCommand('info threads', 5000);
+        console.log('Result:', result);
+        
+        await client.disconnect();
+        console.log('\nTest completed successfully');
+        process.exit(0);
+    } catch (err) {
+        console.error('Failed:', (err as Error).message);
+        process.exit(1);
+    }
 }
 
-// Run if executed directly
-if (require.main === module) {
-  main();
+async function runStdioMode() {
+    console.error('DAP stdio mode not implemented yet');
+    console.error('Use WinCCDebugSession class for DAP server functionality');
+    process.exit(1);
 }
 
-export { main };
+async function main() {
+    const args = parseArgs(process.argv.slice(2));
+    
+    if (args.stdio) {
+        await runStdioMode();
+        return;
+    }
+    
+    // Parse manager type and number
+    let managerType: DatapointConfig['managerType'] = 'CTRL';
+    let managerNumber = 1;
+    
+    if (args.manager) {
+        const [type, num] = args.manager.split(':');
+        managerType = type.toUpperCase() as DatapointConfig['managerType'];
+        managerNumber = parseInt(num, 10);
+    }
+    
+    const config: DatapointConfig = {
+        host: args.host || 'localhost',
+        port: args.port || 4999,
+        system: args.system || 'System1',
+        managerType,
+        managerNumber,
+    };
+    
+    await runInteractiveMode(config);
+}
+
+// Run CLI
+main().catch((err) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+});
