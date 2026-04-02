@@ -1,0 +1,77 @@
+{
+  "name": "@winccoa-tools-pack/npm-winccoa-template",
+  "version": "0.2.0",
+  "description": "Template for WinCC OA npm packages",
+  "author": "winccoa-tools-pack",
+  "license": "MIT",
+  "main": "dist/cjs/index.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./utils/*": {
+      "import": "./dist/esm/utils/*.js",
+      "require": "./dist/cjs/utils/*.js",
+      "types": "./dist/utils/*.d.ts"
+    },
+    "./types/*": {
+      "import": "./dist/esm/types/*.js",
+      "require": "./dist/cjs/types/*.js",
+      "types": "./dist/types/*.d.ts"
+    }
+  },
+  "bin": {
+    "winccoa-pnl-xml": "./dist/cjs/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:types": "tsc -p tsconfig.build.types.json",
+    "build:cjs": "tsc -p tsconfig.build.cjs.json",
+    "build:esm": "tsc -p tsconfig.build.esm.json && node scripts/fix-esm-imports.mjs",
+    "build": "npm run build:types && npm run build:cjs && npm run build:esm",
+    "compile": "tsc --build",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint \"src/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" --fix",
+    "lint:md": "markdownlint \"**/*.md\" --ignore node_modules",
+    "lint:md:fix": "markdownlint \"**/*.md\" --ignore node_modules --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "style-check": "npm run lint && npm run format:check && npm run lint:md",
+    "style-fix": "npm run lint:fix && npm run format && npm run lint:md:fix",
+    "test": "npm run style-check && npm run build && npm run test:unit",
+    "test:unit": "node --import tsx scripts/run-node-tests.ts test/unit",
+    "test:integration": "node --import tsx scripts/run-node-tests.ts test/integration",
+    "ci:integration": "npm ci && npm run build && npm run test:integration"
+  },
+  "dependencies": {
+    "@winccoa-tools-pack/npm-winccoa-core": "^0.2.6"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/node": "^25.3.3",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "globals": "^17.4.0",
+    "markdownlint": "^0.40.0",
+    "markdownlint-cli": "^0.48.0",
+    "prettier": "^3.0.0",
+    "ts-node": "^10.9.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.2.0",
+    "typescript-eslint": "^8.51.0"
+  },
+  "config": {
+    "winccoaImage": "mpokornyetm/winccoa-tools-pack-npm-winccoa-core:npm-winccoa-core"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
