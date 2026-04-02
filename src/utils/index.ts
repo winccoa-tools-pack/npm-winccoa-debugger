@@ -1,6 +1,6 @@
 /**
  * Utility Components
- * 
+ *
  * This module provides utility functions for the debug adapter.
  */
 

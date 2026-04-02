@@ -12,7 +12,7 @@ This package provides a Debug Adapter for debugging WinCC OA CTRL scripts from V
 
 ## Architecture
 
-```
+```text
 src/
 ├── adapter/           # Debug Adapter Protocol handlers
 │   ├── WinCCDebugSession.ts

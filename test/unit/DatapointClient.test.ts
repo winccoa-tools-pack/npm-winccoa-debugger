@@ -1,47 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatapointClient, DatapointConfig, IWinccoaApi, IWinccoaConnection } from '../../src/connection/DatapointClient';
+import { DatapointClient, DatapointConfig, IWinccoaManager } from '../../src/connection/DatapointClient';
 
 // ---------------------------------------------------------------------------
-// Mock WinccoaManagerApi (stand-in for winccoaconnection.node)
+// Mock WinccoaManager (stand-in for official winccoa-manager package)
+// Implements the IWinccoaManager interface with correct API signatures.
 // ---------------------------------------------------------------------------
-class MockWinccoaApi implements IWinccoaApi {
+class MockWinccoaManager implements IWinccoaManager {
     public writtenValues = new Map<string, any>();
-    private callbacks = new Map<string, (value: any) => void>();
+    /** subscription id → { callback, dpeNames } */
+    private subscriptions = new Map<number, { callback: (values: any[], dpeNames: string[]) => void; dpeNames: string | string[] }>();
+    private nextSubId = 1;
 
-    dpConnect(dpName: string, callback: (value: any) => void): void {
-        this.callbacks.set(dpName, callback);
+    /** Official API: callback is FIRST param, returns subscription id */
+    dpConnect(callback: (values: any[], dpeNames: string[]) => void, dpeNames: string | string[], _answer?: boolean): number {
+        const id = this.nextSubId++;
+        this.subscriptions.set(id, { callback, dpeNames });
+        return id;
     }
 
-    dpSet(dpName: string, value: any): void {
-        this.writtenValues.set(dpName, value);
+    dpDisconnect(id: number): void {
+        this.subscriptions.delete(id);
     }
 
-    async dpGet(dpName: string): Promise<any> {
-        return this.writtenValues.get(dpName);
+    dpSet(dpeNames: string | string[], values: any | any[]): void {
+        if (Array.isArray(dpeNames)) {
+            (dpeNames as string[]).forEach((dp, i) => this.writtenValues.set(dp, (values as any[])[i]));
+        } else {
+            this.writtenValues.set(dpeNames as string, values);
+        }
     }
 
-    /** Test helper: simulate a value arriving on a subscribed DPE */
+    async dpSetWait(dpeNames: string | string[], values: any | any[]): Promise<void> {
+        this.dpSet(dpeNames, values);
+    }
+
+    /** Test helper: simulate a DPE value change for subscribers on the given DPE */
     simulateValue(dpName: string, value: any): void {
-        const cb = this.callbacks.get(dpName);
-        if (cb) cb(value);
-    }
-}
-
-class MockWinccoaConnection implements IWinccoaConnection {
-    public started = false;
-    async managerStart(_args: string[], _api: IWinccoaApi): Promise<void> {
-        this.started = true;
-    }
-    prepareExit(): void {
-        this.started = false;
+        for (const { callback, dpeNames } of this.subscriptions.values()) {
+            const subscribed = Array.isArray(dpeNames) ? dpeNames : [dpeNames];
+            if ((subscribed as string[]).includes(dpName)) {
+                callback([value], [dpName]);
+            }
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build a pre-connected DatapointClient with mocks injected
+// Helper: build a DatapointClient with mock manager injected
 // ---------------------------------------------------------------------------
-function makeConnectedClient(config?: Partial<DatapointConfig>): { client: DatapointClient; api: MockWinccoaApi; conn: MockWinccoaConnection } {
+function makeConnectedClient(config?: Partial<DatapointConfig>): { client: DatapointClient; api: MockWinccoaManager } {
     const fullConfig: DatapointConfig = {
         host: 'localhost',
         port: 4999,
@@ -50,10 +58,9 @@ function makeConnectedClient(config?: Partial<DatapointConfig>): { client: Datap
         managerNumber: 1,
         ...config,
     };
-    const api = new MockWinccoaApi();
-    const conn = new MockWinccoaConnection();
-    const client = new DatapointClient(fullConfig, api, conn);
-    return { client, api, conn };
+    const api = new MockWinccoaManager();
+    const client = new DatapointClient(fullConfig, api);
+    return { client, api };
 }
 
 // ---------------------------------------------------------------------------
@@ -79,12 +86,11 @@ test('DatapointClient: builds correct datapoint name', () => {
 });
 
 test('DatapointClient: connect establishes connection via injected api', async () => {
-    const { client, conn } = makeConnectedClient();
+    const { client } = makeConnectedClient();
 
     await client.connect();
 
     assert.ok(client.isConnected());
-    assert.ok(conn.started);
 });
 
 test('DatapointClient: connect subscribes to Result DPE', async () => {
@@ -92,26 +98,21 @@ test('DatapointClient: connect subscribes to Result DPE', async () => {
 
     await client.connect();
 
-    // After connect, dpConnect must have been called for the Result DPE
+    // Simulate a response — the client must receive it without crashing
     const resultDpe = '_CtrlDebug_CTRL_1.Result';
-    // Simulate a value to verify the callback is wired up
-    let received: any = null;
-    // Patch: replace callback with our own to verify
-    api.dpConnect(resultDpe + '_test', (v) => { received = v; });
-    api.simulateValue(resultDpe, ['some-id', 'hello']);
-    // The client should have received it internally (no crash)
+    api.simulateValue(resultDpe, ['unknown-id', 'OK']);
+    // No pending command with that id, so it should emit 'message' (or silently ignore)
     assert.ok(true);
 });
 
 test('DatapointClient: disconnect closes connection', async () => {
-    const { client, conn } = makeConnectedClient();
+    const { client } = makeConnectedClient();
 
     await client.connect();
     assert.ok(client.isConnected());
 
     await client.disconnect();
     assert.ok(!client.isConnected());
-    assert.ok(!conn.started);
 });
 
 test('DatapointClient: sendCommand writes JSON to Command DPE', async () => {

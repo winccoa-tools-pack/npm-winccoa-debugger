@@ -11,6 +11,7 @@ Minimal WinCC OA project for testing the debug adapter.
 ## Usage
 
 This project is used by integration tests to validate:
+
 - DatapointClient connection to _CtrlDebug_Ctrl_1
 - Command encoding/decoding
 - Breakpoint handling

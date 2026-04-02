@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * CLI for WinCC OA Debug Adapter
- * 
+ *
  * Usage:
  *   winccoa-debug-adapter --host localhost --port 4999 --system System1 --manager ctrl:1
  *   winccoa-debug-adapter --stdio   # Run as DAP server on stdin/stdout
@@ -19,10 +19,10 @@ interface CLIArgs {
 
 function parseArgs(args: string[]): CLIArgs {
     const result: CLIArgs = {};
-    
+
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
-        
+
         switch (arg) {
             case '--host':
                 result.host = args[++i];
@@ -45,7 +45,7 @@ function parseArgs(args: string[]): CLIArgs {
                 process.exit(0);
         }
     }
-    
+
     return result;
 }
 
@@ -76,34 +76,34 @@ Examples:
 async function runInteractiveMode(config: DatapointConfig) {
     console.log('WinCC OA Debug Adapter - Interactive Mode');
     console.log('Connecting to:', config);
-    
+
     const client = new DatapointClient(config);
-    
+
     client.on('connected', () => {
         console.log('✓ Connected to WinCC OA');
         console.log('  Debug datapoint:', client.getDebugDp());
     });
-    
+
     client.on('disconnected', () => {
         console.log('✗ Disconnected from WinCC OA');
     });
-    
+
     client.on('error', (err) => {
         console.error('Error:', err.message);
     });
-    
+
     client.on('message', (msg) => {
         console.log('Unsolicited message:', msg);
     });
-    
+
     try {
         await client.connect();
-        
+
         // Simple test: query threads
         console.log('\nSending test command: info threads');
         const result = await client.sendCommand('info threads', 5000);
         console.log('Result:', result);
-        
+
         await client.disconnect();
         console.log('\nTest completed successfully');
         process.exit(0);
@@ -121,22 +121,22 @@ async function runStdioMode() {
 
 async function main() {
     const args = parseArgs(process.argv.slice(2));
-    
+
     if (args.stdio) {
         await runStdioMode();
         return;
     }
-    
+
     // Parse manager type and number
     let managerType: DatapointConfig['managerType'] = 'CTRL';
     let managerNumber = 1;
-    
+
     if (args.manager) {
         const [type, num] = args.manager.split(':');
         managerType = type.toUpperCase() as DatapointConfig['managerType'];
         managerNumber = parseInt(num, 10);
     }
-    
+
     const config: DatapointConfig = {
         host: args.host || 'localhost',
         port: args.port || 4999,
@@ -144,7 +144,7 @@ async function main() {
         managerType,
         managerNumber,
     };
-    
+
     await runInteractiveMode(config);
 }
 

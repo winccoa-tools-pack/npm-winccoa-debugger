@@ -11,6 +11,7 @@ This POC demonstrates the DatapointClient implementation for communicating with 
 The DatapointClient provides low-level communication with WinCC OA's CTRL debugger through the `_CtrlDebug_<Manager>_<Num>` datapoint system.
 
 **Features**:
+
 - ✅ TCP connection to WinCC OA via npm-winccoa-core Manager
 - ✅ dpConnect to Result DPE for receiving responses
 - ✅ dpSet to Command DPE for sending commands
@@ -20,7 +21,8 @@ The DatapointClient provides low-level communication with WinCC OA's CTRL debugg
 - ✅ Error handling and reconnection support
 
 **Protocol**:
-```
+
+```text
 Command DPE: _CtrlDebug_CTRL_1.Command (Text)
   Format: {"id": "timestamp-random", "cmd": "break scripts/test.ctl 10"}
 
@@ -33,6 +35,7 @@ Result DPE: _CtrlDebug_CTRL_1.Result (dyn_string)
 **File**: `test/unit/DatapointClient.test.ts`
 
 **Test Coverage**:
+
 - ✅ Constructor initialization
 - ✅ Datapoint name generation (`_CtrlDebug_CTRL_1`, `_CtrlDebug_UI_5`, etc.)
 - ✅ Command sending with response handling
@@ -58,12 +61,14 @@ npm run test:unit
 **File**: `test/integration/DatapointClient-integration.test.ts`
 
 Tests against real WinCC OA system:
+
 - Connection to WinCC OA
 - Sending debug commands
 - Receiving responses
 - Disconnection
 
 **Prerequisites**:
+
 - WinCC OA installed and running
 - Test project with CTRL manager
 - Debug datapoint configured
@@ -73,11 +78,13 @@ Tests against real WinCC OA system:
 **Location**: `test/fixtures/projects/debugger-poc/`
 
 **Contents**:
+
 - `config/config` - WinCC OA project configuration
 - `config/progs` - Manager configuration (WCCOActrl with debug enabled)
 - `scripts/debugTest.ctl` - Sample CTRL script for debugging
 
 **Usage**:
+
 ```bash
 # Start test project (manual)
 cd test/fixtures/projects/debugger-poc
@@ -119,7 +126,8 @@ npm run test:unit
 ```
 
 Expected output:
-```
+
+```text
 ✔ DatapointClient: constructor initializes with config (2.063429ms)
 ✔ DatapointClient: builds correct datapoint name (0.181914ms)
 ✔ DatapointClient: sendCommand sends data to debug datapoint (10ms)
@@ -147,7 +155,7 @@ node dist/cjs/cli.js --manager ctrl:1
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │         VS Code Extension                │
 │  (vscode-winccoa-debugger)              │
@@ -180,12 +188,14 @@ node dist/cjs/cli.js --manager ctrl:1
 **Goal**: Structured command building and response parsing
 
 **Tasks**:
+
 - [ ] CommandEncoder: Build debug commands (break, step, info, print)
 - [ ] ResponseParser: Parse dyn_string responses to structured data
 - [ ] Unit tests for encoding/parsing
 - [ ] Integration tests with real debugger
 
 **Files to create**:
+
 - `src/protocol/CommandEncoder.ts`
 - `src/protocol/ResponseParser.ts`
 - `test/unit/CommandEncoder.test.ts`
@@ -196,12 +206,14 @@ node dist/cjs/cli.js --manager ctrl:1
 **Goal**: Basic DAP integration
 
 **Tasks**:
+
 - [ ] WinCCDebugSession: Initialize, Launch, Disconnect
 - [ ] BreakpointManager: SetBreakpoints
 - [ ] ThreadManager: Thread tracking
 - [ ] Simple debug session test
 
 **Files to implement**:
+
 - `src/adapter/WinCCDebugSession.ts`
 - `src/adapter/BreakpointManager.ts`
 - `src/adapter/ThreadManager.ts`
@@ -209,7 +221,7 @@ node dist/cjs/cli.js --manager ctrl:1
 
 ## File Structure
 
-```
+```text
 npm-winccoa-debugger/
 ├── src/
 │   ├── connection/
@@ -243,6 +255,7 @@ npm-winccoa-debugger/
 ### Why EventEmitter?
 
 DatapointClient extends EventEmitter for asynchronous event handling:
+
 - `connected` - Connection established
 - `disconnected` - Connection lost
 - `error` - Error occurred
@@ -251,12 +264,14 @@ DatapointClient extends EventEmitter for asynchronous event handling:
 ### Why Promise-based sendCommand()?
 
 Commands return a Promise that resolves when the response arrives:
+
 ```typescript
 const result = await client.sendCommand('info threads', 5000);
 // result: ['thread1', 'thread2', ...]
 ```
 
 This provides:
+
 - Clean async/await syntax
 - Timeout handling
 - Command/response correlation via unique IDs
@@ -264,6 +279,7 @@ This provides:
 ### Why separate CommandEncoder/ResponseParser?
 
 Separation of concerns:
+
 - `DatapointClient` - Low-level transport
 - `CommandEncoder` - High-level command building
 - `ResponseParser` - High-level response parsing

@@ -1,11 +1,11 @@
 /**
  * WinCC OA Debug Adapter
- * 
+ *
  * Main entry point for the debug adapter package.
- * 
+ *
  * This package provides Debug Adapter Protocol (DAP) implementation for debugging
  * WinCC OA CTRL scripts from VS Code.
- * 
+ *
  * @packageDocumentation
  */
 

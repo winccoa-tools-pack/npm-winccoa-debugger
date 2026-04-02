@@ -1,6 +1,6 @@
 /**
  * Protocol Components
- * 
+ *
  * This module provides protocol translation between DAP and WinCC OA.
  */
 
