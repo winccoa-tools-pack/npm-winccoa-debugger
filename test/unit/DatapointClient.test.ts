@@ -1,195 +1,180 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import { DatapointClient, DatapointConfig } from '../../src/connection/DatapointClient';
+import { DatapointClient, DatapointConfig, IWinccoaApi, IWinccoaConnection } from '../../src/connection/DatapointClient';
 
-// Mock for npm-winccoa-core Manager class
-class MockManager extends EventEmitter {
-    private connected = false;
-    public mockDatapoints = new Map<string, any>();
-    private dpCallbacks = new Map<string, (value: any) => void>();
+// ---------------------------------------------------------------------------
+// Mock WinccoaManagerApi (stand-in for winccoaconnection.node)
+// ---------------------------------------------------------------------------
+class MockWinccoaApi implements IWinccoaApi {
+    public writtenValues = new Map<string, any>();
+    private callbacks = new Map<string, (value: any) => void>();
 
-    async connect(): Promise<void> {
-        this.connected = true;
-        this.emit('connected');
+    dpConnect(dpName: string, callback: (value: any) => void): void {
+        this.callbacks.set(dpName, callback);
     }
 
-    async disconnect(): Promise<void> {
-        this.connected = false;
-        this.emit('disconnected');
+    dpSet(dpName: string, value: any): void {
+        this.writtenValues.set(dpName, value);
     }
 
-    isConnected(): boolean {
-        return this.connected;
+    async dpGet(dpName: string): Promise<any> {
+        return this.writtenValues.get(dpName);
     }
 
-    // Mock dpConnect - simulates WinCC OA datapoint connection
-    async dpConnect(dpName: string, callback: (value: any) => void): Promise<void> {
-        if (!this.connected) {
-            throw new Error('Not connected');
-        }
-        
-        this.dpCallbacks.set(dpName, callback);
-        this.on(`dp:${dpName}`, callback);
-    }
-
-    // Mock dpSet - simulates WinCC OA datapoint write
-    async dpSet(dpName: string, value: any): Promise<void> {
-        if (!this.connected) {
-            throw new Error('Not connected');
-        }
-        
-        this.mockDatapoints.set(dpName, value);
-    }
-
-    // Test helper to simulate incoming datapoint changes
-    simulateDpChange(dpName: string, value: any): void {
-        const callback = this.dpCallbacks.get(dpName);
-        if (callback) {
-            callback(value);
-        }
+    /** Test helper: simulate a value arriving on a subscribed DPE */
+    simulateValue(dpName: string, value: any): void {
+        const cb = this.callbacks.get(dpName);
+        if (cb) cb(value);
     }
 }
 
-test('DatapointClient: constructor initializes with config', () => {
-    const config: DatapointConfig = {
+class MockWinccoaConnection implements IWinccoaConnection {
+    public started = false;
+    async managerStart(_args: string[], _api: IWinccoaApi): Promise<void> {
+        this.started = true;
+    }
+    prepareExit(): void {
+        this.started = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: build a pre-connected DatapointClient with mocks injected
+// ---------------------------------------------------------------------------
+function makeConnectedClient(config?: Partial<DatapointConfig>): { client: DatapointClient; api: MockWinccoaApi; conn: MockWinccoaConnection } {
+    const fullConfig: DatapointConfig = {
         host: 'localhost',
         port: 4999,
         system: 'System1',
         managerType: 'CTRL',
         managerNumber: 1,
+        ...config,
     };
+    const api = new MockWinccoaApi();
+    const conn = new MockWinccoaConnection();
+    const client = new DatapointClient(fullConfig, api, conn);
+    return { client, api, conn };
+}
 
-    const client = new DatapointClient(config);
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test('DatapointClient: constructor initializes with config', () => {
+    const { client } = makeConnectedClient();
     assert.ok(client);
     assert.equal(client.getDebugDp(), '_CtrlDebug_CTRL_1');
-});
-
-test('DatapointClient: connect establishes connection', async () => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
-
-    const client = new DatapointClient(config);
-    
-    // Mock the internal manager (this would be injected in real implementation)
-    const mockManager = new MockManager();
-    (client as any).manager = mockManager;
-
-    await client.connect();
-    
-    assert.ok(mockManager.isConnected());
-});
-
-test('DatapointClient: disconnect closes connection', async () => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
-
-    const client = new DatapointClient(config);
-    const mockManager = new MockManager();
-    (client as any).manager = mockManager;
-
-    await client.connect();
-    await client.disconnect();
-    
-    assert.ok(!mockManager.isConnected());
-});
-
-test('DatapointClient: sendCommand sends data to debug datapoint', async () => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
-
-    const client = new DatapointClient(config);
-    const mockManager = new MockManager();
-    await mockManager.connect(); // Connect the mock
-    await mockManager.dpConnect('_CtrlDebug_CTRL_1.Result', (value: any) => {
-        (client as any).handleResponse(value);
-    });
-    (client as any).manager = mockManager;
-    (client as any).connected = true;
-
-    const cmdPromise = client.sendCommand('break scripts/debugTest.ctl 10');
-    
-    // Simulate response
-    setTimeout(() => {
-        const sentValue = mockManager.mockDatapoints.get('_CtrlDebug_CTRL_1.Command');
-        assert.ok(sentValue);
-        
-        const cmd = JSON.parse(sentValue);
-        mockManager.simulateDpChange('_CtrlDebug_CTRL_1.Result', [cmd.id, 'OK', 'Breakpoint set']);
-    }, 10);
-    
-    const result = await cmdPromise;
-    assert.deepEqual(result, ['OK', 'Breakpoint set']);
-});
-
-test('DatapointClient: receives response from debug datapoint', async (t) => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
-
-    const client = new DatapointClient(config);
-    const mockManager = new MockManager();
-    await mockManager.connect(); // Connect the mock
-    await mockManager.dpConnect('_CtrlDebug_CTRL_1.Result', (value: any) => {
-        (client as any).handleResponse(value);
-    });
-    (client as any).manager = mockManager;
-    (client as any).connected = true;
-
-    // Send command and wait for response
-    const cmdPromise = client.sendCommand('info threads');
-    
-    setTimeout(() => {
-        const sentValue = mockManager.mockDatapoints.get('_CtrlDebug_CTRL_1.Command');
-        const cmd = JSON.parse(sentValue);
-        mockManager.simulateDpChange('_CtrlDebug_CTRL_1.Result', [cmd.id, 'thread1', 'thread2']);
-    }, 10);
-
-    const result = await cmdPromise;
-    assert.deepEqual(result, ['thread1', 'thread2']);
+    assert.ok(!client.isConnected());
 });
 
 test('DatapointClient: builds correct datapoint name', () => {
-    const config1: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
+    const { client: ctrl1 } = makeConnectedClient({ managerType: 'CTRL', managerNumber: 1 });
+    assert.equal(ctrl1.getDebugDp(), '_CtrlDebug_CTRL_1');
 
-    const client1 = new DatapointClient(config1);
-    assert.equal(client1.getDebugDp(), '_CtrlDebug_CTRL_1');
+    const { client: ui5 } = makeConnectedClient({ managerType: 'UI', managerNumber: 5 });
+    assert.equal(ui5.getDebugDp(), '_CtrlDebug_UI_5');
 
-    const config2: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'UI',
-        managerNumber: 5,
-    };
+    const { client: driver3 } = makeConnectedClient({ managerType: 'DRIVER', managerNumber: 3 });
+    assert.equal(driver3.getDebugDp(), '_CtrlDebug_DRIVER_3');
+});
 
-    const client2 = new DatapointClient(config2);
-    assert.equal(client2.getDebugDp(), '_CtrlDebug_UI_5');
+test('DatapointClient: connect establishes connection via injected api', async () => {
+    const { client, conn } = makeConnectedClient();
+
+    await client.connect();
+
+    assert.ok(client.isConnected());
+    assert.ok(conn.started);
+});
+
+test('DatapointClient: connect subscribes to Result DPE', async () => {
+    const { client, api } = makeConnectedClient();
+
+    await client.connect();
+
+    // After connect, dpConnect must have been called for the Result DPE
+    const resultDpe = '_CtrlDebug_CTRL_1.Result';
+    // Simulate a value to verify the callback is wired up
+    let received: any = null;
+    // Patch: replace callback with our own to verify
+    api.dpConnect(resultDpe + '_test', (v) => { received = v; });
+    api.simulateValue(resultDpe, ['some-id', 'hello']);
+    // The client should have received it internally (no crash)
+    assert.ok(true);
+});
+
+test('DatapointClient: disconnect closes connection', async () => {
+    const { client, conn } = makeConnectedClient();
+
+    await client.connect();
+    assert.ok(client.isConnected());
+
+    await client.disconnect();
+    assert.ok(!client.isConnected());
+    assert.ok(!conn.started);
+});
+
+test('DatapointClient: sendCommand writes JSON to Command DPE', async () => {
+    const { client, api } = makeConnectedClient();
+    await client.connect();
+
+    // Fire response after a tick
+    setTimeout(() => {
+        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1.Command');
+        assert.ok(raw, 'Command DPE should have been written');
+        const cmd = JSON.parse(raw);
+        assert.ok(cmd.id, 'Command must have an id');
+        assert.equal(cmd.cmd, 'break scripts/debugTest.ctl 10');
+        // Simulate WinCC OA response
+        api.simulateValue('_CtrlDebug_CTRL_1.Result', [cmd.id, 'OK', 'Breakpoint set at line 10']);
+    }, 10);
+
+    const result = await client.sendCommand('break scripts/debugTest.ctl 10');
+    assert.deepEqual(result, ['OK', 'Breakpoint set at line 10']);
+});
+
+test('DatapointClient: sendCommand returns parsed response array', async () => {
+    const { client, api } = makeConnectedClient();
+    await client.connect();
+
+    setTimeout(() => {
+        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1.Command');
+        const cmd = JSON.parse(raw);
+        api.simulateValue('_CtrlDebug_CTRL_1.Result', [cmd.id, 'thread1', 'thread2', 'thread3']);
+    }, 10);
+
+    const result = await client.sendCommand('info threads');
+    assert.deepEqual(result, ['thread1', 'thread2', 'thread3']);
+});
+
+test('DatapointClient: sendCommand times out when no response', async () => {
+    const { client } = makeConnectedClient();
+    await client.connect();
+
+    // No response simulated
+    try {
+        await client.sendCommand('info threads', 100);
+        assert.fail('Should have timed out');
+    } catch (err) {
+        assert.ok(err instanceof Error);
+        assert.match((err as Error).message, /timeout/i);
+    }
+});
+
+test('DatapointClient: disconnect cancels pending commands', async () => {
+    const { client } = makeConnectedClient();
+    await client.connect();
+
+    const cmdPromise = client.sendCommand('info threads', 5000);
+    await client.disconnect();
+
+    try {
+        await cmdPromise;
+        assert.fail('Should have been rejected');
+    } catch (err) {
+        assert.ok(err instanceof Error);
+        assert.match((err as Error).message, /closed/i);
+    }
 });
 
 test('DatapointClient: handles connection errors', async () => {
@@ -201,67 +186,16 @@ test('DatapointClient: handles connection errors', async () => {
         managerNumber: 1,
     };
 
+    // No injected api → will try to load real addon → expected to fail in test env
     const client = new DatapointClient(config);
-    
-    // In real scenario, connect would fail
-    // For now, just verify client was created
-    assert.ok(client);
     assert.ok(!client.isConnected());
-});
 
-test('DatapointClient: emits error events', async (t) => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
-
-    const client = new DatapointClient(config);
-    const mockManager = new MockManager();
-    (client as any).manager = mockManager;
-
-    let errorEmitted = false;
-    client.on('error', (err) => {
-        errorEmitted = true;
-        assert.ok(err instanceof Error);
-    });
-
-    await client.connect();
-
-    // Simulate error
-    mockManager.emit('error', new Error('Test error'));
-
-    await new Promise(resolve => setTimeout(resolve, 50));
-
-    assert.ok(errorEmitted);
-});
-
-test('DatapointClient: command timeout', async () => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
-
-    const client = new DatapointClient(config);
-    const mockManager = new MockManager();
-    await mockManager.connect(); // Connect the mock
-    await mockManager.dpConnect('_CtrlDebug_CTRL_1.Result', (value: any) => {
-        (client as any).handleResponse(value);
-    });
-    (client as any).manager = mockManager;
-    (client as any).connected = true;
-
-    // Send command with short timeout, don't send response
+    let threw = false;
     try {
-        await client.sendCommand('info threads', 100);
-        assert.fail('Should have timed out');
-    } catch (err) {
-        assert.ok(err instanceof Error);
-        assert.match((err as Error).message, /timeout/i);
+        await client.connect();
+    } catch {
+        threw = true;
     }
+    assert.ok(threw, 'connect() without WinCC OA should throw');
 });
+

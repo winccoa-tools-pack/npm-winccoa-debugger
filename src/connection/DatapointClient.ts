@@ -1,24 +1,43 @@
 /**
  * DatapointClient
- * 
+ *
  * Client for communicating with WinCC OA via the Datapoint API.
- * 
+ *
  * Responsibilities:
- * - Connect to WinCC OA Data Manager
- * - Send commands to _CtrlDebug_<Manager>_<Num> datapoint
- * - Receive responses via HotLink callback
- * - Handle connection lifecycle (connect, disconnect, reconnect)
+ * - Connect to WinCC OA as a manager via winccoaconnection.node
+ * - Send commands to _CtrlDebug_<Manager>_<Num>.Command datapoint
+ * - Receive responses via dpConnect on .Result datapoint
+ * - Handle connection lifecycle (connect, disconnect)
  * - Emit events for incoming messages
- * 
+ *
  * Protocol:
  * - Command DPE: _CtrlDebug_CTRL_1.Command (Text)
- * - Result DPE: _CtrlDebug_CTRL_1.Result (dyn_string)
- * - Commands are JSON encoded: { id: "uuid", cmd: "command string" }
- * - Responses are JSON arrays matching command ID
+ * - Result DPE:  _CtrlDebug_CTRL_1.Result (dyn_string)
+ * - Commands are JSON:  { id: "timestamp-random", cmd: "break scripts/test.ctl 10" }
+ * - Responses are JSON array: ["timestamp-random", "OK", ...lines]
+ *
+ * How it works:
+ * The Node.js process connects to WinCC OA as a manager via the native
+ * winccoaconnection.node addon (shipped with WinCC OA). This is NOT a raw
+ * TCP socket — WinCC OA handles the protocol internally.
  */
 
 import { EventEmitter } from 'events';
-import { Manager } from '@winccoa-tools-pack/npm-winccoa-core';
+import path from 'path';
+import { getWinCCOAInstallationPathByVersion, getAvailableWinCCOAVersions } from '@winccoa-tools-pack/npm-winccoa-core';
+
+/** Minimal interface for the WinccoaManagerApi from winccoaconnection.node */
+export interface IWinccoaApi {
+  dpConnect(dpName: string, callback: (value: any) => void): void;
+  dpSet(dpName: string, value: any): void;
+  dpGet(dpName: string): Promise<any>;
+}
+
+/** Minimal interface for WinccoaManagerConnection */
+export interface IWinccoaConnection {
+  managerStart(args: string[], api: IWinccoaApi): Promise<void>;
+  prepareExit(): void;
+}
 
 export interface DatapointConfig {
   /** WinCC OA system name */
@@ -44,50 +63,62 @@ export class DatapointClient extends EventEmitter {
   private config: DatapointConfig;
   private connected = false;
   private debugDp = '';
-  private manager: Manager | null = null;
+  private api: IWinccoaApi | null = null;
+  private connection: IWinccoaConnection | null = null;
   private pendingCommands = new Map<string, { resolve: (value: string[]) => void; reject: (err: Error) => void; timeout: NodeJS.Timeout }>();
 
-  constructor(config: DatapointConfig) {
+  /**
+   * @param config - Connection configuration
+   * @param api - Optional WinccoaManagerApi instance for dependency injection (testing)
+   * @param connection - Optional WinccoaManagerConnection for dependency injection (testing)
+   */
+  constructor(config: DatapointConfig, api?: IWinccoaApi, connection?: IWinccoaConnection) {
     super();
     this.config = config;
     this.debugDp = this.getDebugDpName();
+    if (api) {
+      this.api = api;
+    }
+    if (connection) {
+      this.connection = connection;
+    }
   }
 
   /**
-   * Connect to WinCC OA
+   * Connect to WinCC OA.
+   * If no api was injected, loads winccoaconnection.node from the WinCC OA installation.
    */
   public async connect(): Promise<void> {
     try {
-      // Create Manager instance from npm-winccoa-core
-      this.manager = new Manager({
-        host: this.config.host,
-        port: this.config.port,
-        managerOptions: {
-          manNum: 1,
-          manType: 'ctrl',
-        },
-      });
+      if (!this.api) {
+        // Load real WinCC OA native addon
+        const addonPath = this.resolveAddonPath();
+        const { WinccoaManagerApi, WinccoaManagerConnection } = require(addonPath);
+        this.api = new WinccoaManagerApi() as IWinccoaApi;
+        this.connection = new WinccoaManagerConnection() as IWinccoaConnection;
+      }
 
-      // Setup error handling
-      this.manager.on('error', (err: Error) => {
-        this.emit('error', err);
-      });
+      // Register as a WinCC OA manager (no-op when connection is mocked)
+      if (this.connection) {
+        await this.connection.managerStart(
+          [
+            `-proj`, this.config.system,
+            `-host`, this.config.host,
+            `-port`, String(this.config.port),
+            `-num`, `90`,    // high manager number to avoid conflicts
+            `-m`, `apiMgr`,  // API manager type
+          ],
+          this.api,
+        );
+      }
 
-      this.manager.on('disconnected', () => {
-        this.connected = false;
-        this.emit('disconnected');
-      });
-
-      // Connect to WinCC OA
-      await this.manager.connect();
-      this.connected = true;
-
-      // Setup datapoint connection to receive responses
+      // Subscribe to the Result DPE to receive debugger responses
       const resultDpe = `${this.debugDp}.Result`;
-      await this.manager.dpConnect(resultDpe, (value: any) => {
+      this.api.dpConnect(resultDpe, (value: any) => {
         this.handleResponse(value);
       });
 
+      this.connected = true;
       this.emit('connected');
     } catch (err) {
       this.emit('error', err);
@@ -100,17 +131,18 @@ export class DatapointClient extends EventEmitter {
    */
   public async disconnect(): Promise<void> {
     // Cancel all pending commands
-    for (const [id, pending] of this.pendingCommands.entries()) {
+    for (const pending of this.pendingCommands.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error('Connection closed'));
     }
     this.pendingCommands.clear();
 
-    // Disconnect manager
-    if (this.manager) {
-      await this.manager.disconnect();
-      this.manager = null;
+    // Disconnect from WinCC OA
+    if (this.connection) {
+      this.connection.prepareExit();
+      this.connection = null;
     }
+    this.api = null;
 
     this.connected = false;
     this.emit('disconnected');
@@ -120,7 +152,7 @@ export class DatapointClient extends EventEmitter {
    * Send command to WinCC OA debugger
    */
   public async sendCommand(cmd: string, timeout = 5000): Promise<string[]> {
-    if (!this.connected || !this.manager) {
+    if (!this.connected || !this.api) {
       throw new Error('Not connected to WinCC OA');
     }
 
@@ -143,7 +175,7 @@ export class DatapointClient extends EventEmitter {
     try {
       // Send command via dpSet to Command DPE
       const commandDpe = `${this.debugDp}.Command`;
-      await this.manager.dpSet(commandDpe, JSON.stringify(command));
+      this.api.dpSet(commandDpe, JSON.stringify(command));
 
       // Wait for response
       return await responsePromise;
@@ -224,5 +256,26 @@ export class DatapointClient extends EventEmitter {
    */
   public getDebugDp(): string {
     return this.debugDp;
+  }
+
+  /**
+   * Resolve path to winccoaconnection.node from the installed WinCC OA version.
+   * Uses npm-winccoa-core to find the installation path.
+   */
+  private resolveAddonPath(): string {
+    const versions = getAvailableWinCCOAVersions();
+    if (versions.length === 0) {
+      throw new Error('No WinCC OA installation found. Install WinCC OA or inject a mock api for testing.');
+    }
+
+    // Prefer exact version match, fall back to latest
+    const version = versions.includes('3.21') ? '3.21' : versions[versions.length - 1];
+    const installPath = getWinCCOAInstallationPathByVersion(version);
+
+    if (!installPath) {
+      throw new Error(`WinCC OA installation path not found for version ${version}`);
+    }
+
+    return path.join(installPath, 'bin', 'winccoaconnection.node');
   }
 }
