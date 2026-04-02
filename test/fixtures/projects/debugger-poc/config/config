@@ -1,16 +1,8 @@
 [general]
-pvss_path = "/opt/WinCC_OA/3.21"
-proj_path = "/opt/WinCC_OA/3.21/TestFramework_3.21"
-proj_version = "3.21"
-
-distributed = 0
-distPeer = ""
-redundant = 0
-split = 0
-eventMan = 1
-data = 0
-
-lang = "en_US.utf8"
+pvss_path = "<WinCC_OA_PATH>"
+proj_path = "<PROJ_DIR>"
+proj_version = "<WinCC_OA_VERSION>"
+useSQLite = 1
 langs = "en_US.utf8"
 
 [ctrl]

@@ -35,8 +35,8 @@
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
-import { spawn, SpawnOptions } from 'child_process';
 import {
+    PmonComponent,
     getAvailableWinCCOAVersions,
     getWinCCOAInstallationPathByVersion,
 } from '@winccoa-tools-pack/npm-winccoa-core';
@@ -102,6 +102,11 @@ async function waitForPortClosed(
     }
 }
 
+/** Escapes special regex characters in a literal string */
+function escapeRegExp(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // ─── main class ──────────────────────────────────────────────────────────────
 
 export class WinccoaProjectLifecycle {
@@ -112,6 +117,8 @@ export class WinccoaProjectLifecycle {
     private readonly projName: string;
     private winccoaInstallPath: string | null = null;
     private winccoaVersion: string | null = null;
+    /** Set to true when start() registered the project (so stop() can unregister it) */
+    private didRegisterProject = false;
 
     constructor(projPath: string) {
         this.projPath = path.resolve(projPath);
@@ -124,6 +131,11 @@ export class WinccoaProjectLifecycle {
             process.env['WINCCOA_TEST_PROJ'] ??
             process.env['PVSS_II_PROJ'] ??
             path.basename(this.projPath);
+
+        // Restore config placeholders synchronously on process exit so the fixture
+        // stays as a committed template even when --test-force-exit kills the process
+        // before async cleanup in test.after() fully completes.
+        process.on('exit', () => this.restoreConfigPlaceholders());
     }
 
     // ─── public API ────────────────────────────────────────────────────────────
@@ -149,7 +161,8 @@ export class WinccoaProjectLifecycle {
     }
 
     /**
-     * Prepare config files, start pmon and wait for the Data Manager to be ready.
+     * Prepare config files, register + start pmon and wait for the Data Manager
+     * to accept connections.
      * Idempotent: if WinCC OA is already reachable on the configured port, startup
      * is skipped (another process may already be running the project).
      */
@@ -164,8 +177,21 @@ export class WinccoaProjectLifecycle {
             return;
         }
 
+        const info = this.resolveInstallation();
+        if (!info) throw new Error('[WinccoaProjectLifecycle] WinCC OA installation not found');
+
+        const pmon = new PmonComponent();
+        pmon.setVersion(info.version);
+
+        // Register the project in /etc/opt/pvss/pvssInst.conf so pmon can find it.
+        const configFilePath = path.join(this.projPath, 'config', 'config');
+        console.log(`[WinccoaProjectLifecycle] Registering project "${this.projName}" …`);
+        await pmon.registerProject(configFilePath, info.version);
+        this.didRegisterProject = true;
+
+        // Start pmon detached — pmon auto-starts managers whose mode is 'always'.
         console.log(`[WinccoaProjectLifecycle] Starting WinCC OA project "${this.projName}"…`);
-        await this.spawnPmon();
+        await pmon.startProject(this.projName, false);
 
         const ready = await waitForPort(this.host, this.port, STARTUP_TIMEOUT_MS);
         if (!ready) {
@@ -180,6 +206,7 @@ export class WinccoaProjectLifecycle {
     /**
      * Stop pmon and wait for the port to close.
      * Safe to call even when start() was skipped.
+     * If start() registered the project, it will be unregistered on stop.
      */
     public async stop(): Promise<void> {
         this.requireAvailable();
@@ -189,10 +216,24 @@ export class WinccoaProjectLifecycle {
             return;
         }
 
+        const info = this.resolveInstallation();
+        if (!info) throw new Error('[WinccoaProjectLifecycle] WinCC OA installation not found');
+
+        const pmon = new PmonComponent();
+        pmon.setVersion(info.version);
+
         console.log(`[WinccoaProjectLifecycle] Stopping WinCC OA project "${this.projName}"…`);
-        await this.spawnPmonStop();
+        await pmon.stopProjectAndPmon(this.projName, STOP_TIMEOUT_MS);
         await waitForPortClosed(this.host, this.port, STOP_TIMEOUT_MS);
         console.log('[WinccoaProjectLifecycle] WinCC OA stopped');
+
+        if (this.didRegisterProject) {
+            console.log(`[WinccoaProjectLifecycle] Unregistering project "${this.projName}"…`);
+            await pmon.unregisterProject(this.projName);
+            this.didRegisterProject = false;
+        }
+
+        this.restoreConfigPlaceholders();
     }
 
     /**
@@ -257,7 +298,7 @@ export class WinccoaProjectLifecycle {
     }
 
     /**
-     * Replaces <WinCC_OA_PATH> and <WinCC_OA_VERSION> placeholders in every
+     * Replaces <WinCC_OA_PATH>, <WinCC_OA_VERSION>, and <PROJ_DIR> placeholders in every
      * text file under config/ (in-place).
      */
     private substituteConfigPlaceholders(): void {
@@ -271,12 +312,48 @@ export class WinccoaProjectLifecycle {
             const filePath = path.join(configDir, file);
             if (!fs.statSync(filePath).isFile()) continue;
             let content = fs.readFileSync(filePath, 'utf-8');
-            if (!content.includes('<WinCC_OA_PATH>') && !content.includes('<WinCC_OA_VERSION>')) {
+            if (
+                !content.includes('<WinCC_OA_PATH>') &&
+                !content.includes('<WinCC_OA_VERSION>') &&
+                !content.includes('<PROJ_DIR>')
+            ) {
                 continue;
             }
             content = content
                 .replace(/<WinCC_OA_PATH>/g, info.installPath)
-                .replace(/<WinCC_OA_VERSION>/g, info.version);
+                .replace(/<WinCC_OA_VERSION>/g, info.version)
+                .replace(/<PROJ_DIR>/g, this.projPath);
+            fs.writeFileSync(filePath, content, 'utf-8');
+        }
+    }
+
+    /**
+     * Reverses substituteConfigPlaceholders() — restores template placeholders so
+     * the config files stay as committed templates in version control.
+     */
+    private restoreConfigPlaceholders(): void {
+        const info = this.resolveInstallation();
+        if (!info) return;
+
+        const configDir = path.join(this.projPath, 'config');
+        if (!fs.existsSync(configDir)) return;
+
+        for (const file of fs.readdirSync(configDir)) {
+            const filePath = path.join(configDir, file);
+            if (!fs.statSync(filePath).isFile()) continue;
+            let content = fs.readFileSync(filePath, 'utf-8');
+            // Only process files that contain substituted values
+            if (
+                !content.includes(info.installPath) &&
+                !content.includes(info.version) &&
+                !content.includes(this.projPath)
+            ) {
+                continue;
+            }
+            content = content
+                .replace(new RegExp(escapeRegExp(this.projPath), 'g'), '<PROJ_DIR>')
+                .replace(new RegExp(escapeRegExp(info.installPath), 'g'), '<WinCC_OA_PATH>')
+                .replace(new RegExp(escapeRegExp(info.version), 'g'), '<WinCC_OA_VERSION>');
             fs.writeFileSync(filePath, content, 'utf-8');
         }
     }
@@ -299,38 +376,4 @@ export class WinccoaProjectLifecycle {
         }
     }
 
-    private pmonBin(): string {
-        const info = this.resolveInstallation();
-        if (!info) throw new Error('WinCC OA not found');
-        return path.join(info.installPath, 'bin', 'WCCILpmon');
-    }
-
-    private spawnDetached(cmd: string, args: string[]): Promise<void> {
-        return new Promise((resolve, reject) => {
-            const opts: SpawnOptions = { detached: true, stdio: 'ignore' };
-            const child = spawn(cmd, args, opts);
-            child.on('error', reject);
-            // We only wait for spawn to succeed, not for the process to exit
-            child.unref();
-            resolve();
-        });
-    }
-
-    private spawnAndWait(cmd: string, args: string[]): Promise<number> {
-        return new Promise((resolve, reject) => {
-            const child = spawn(cmd, args, { stdio: 'pipe' });
-            child.on('error', reject);
-            child.on('close', (code) => resolve(code ?? 0));
-        });
-    }
-
-    private async spawnPmon(): Promise<void> {
-        // WCCILpmon -proj <path> — starts pmon as a daemon when run without -stop/-status
-        await this.spawnDetached(this.pmonBin(), ['-proj', this.projPath]);
-    }
-
-    private async spawnPmonStop(): Promise<void> {
-        // WCCILpmon -proj <path> -stopWait — stops and waits
-        await this.spawnAndWait(this.pmonBin(), ['-proj', this.projPath, '-stopWait']);
-    }
 }

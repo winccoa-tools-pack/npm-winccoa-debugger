@@ -3,6 +3,6 @@ version 1
 auth "" ""
 #Manager         | Start  | SecKill | Restart# | ResetMin | Options
 WCCILpmon        | manual |      30 |        3 |        1 |
-WCCOAevent       | manual |      30 |        3 |        1 |
-WCCOAdata        | manual |      30 |        3 |        1 |
-WCCOActrl        | manual |      30 |        3 |        1 | -num 1 -f scripts/debugTest.ctl
+WCCILevent       | always |      30 |        3 |        1 |
+WCCILdataSQLite  | always |      30 |        3 |        1 |
+WCCOActrl        | always |      30 |        3 |        1 | -num 1 -f scripts/debugTest.ctl
