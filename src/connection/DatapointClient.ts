@@ -67,10 +67,28 @@ export interface DatapointConfig {
     host: string;
     /** Port number */
     port: number;
-    /** Manager type */
+    /** Manager type of the CTRL manager we want to debug */
     managerType: 'CTRL' | 'UI' | 'EVENT' | 'ASCII' | 'DEVICE' | 'API' | 'DRIVER';
-    /** Manager number */
+    /** Manager number of the CTRL manager we want to debug */
     managerNumber: number;
+    /**
+     * WinCC OA connection arguments to inject into process.argv before the
+     * winccoa-manager singleton is initialised.
+     *
+     * In production the process is started by pmon, which passes these flags
+     * automatically.  In integration tests – where the test runner is a plain
+     * `node` process without WinCC OA args – supply them explicitly so the
+     * native addon can connect:
+     *
+     * ```ts
+     * connectionArgs: ['-proj', 'System1', '-host', 'localhost',
+     *                  '-port', '4999',   '-num',  '10', '-m', 'jscript']
+     * ```
+     *
+     * The manager number here (-num) is OUR manager number (the adapter),
+     * not the CTRL manager number in `managerNumber` above.
+     */
+    connectionArgs?: string[];
 }
 
 export interface DebugCommand {
@@ -130,8 +148,17 @@ export class DatapointClient extends EventEmitter {
     public async connect(): Promise<void> {
         try {
             if (!this.api) {
+                // If explicit connection args are provided (integration test scenario),
+                // inject them into process.argv BEFORE the winccoa-manager singleton
+                // initialises its native ConnectionBinding. The singleton reads
+                // process.argv exactly once, so this must happen before the first
+                // `new WinccoaManager()` call in the current process.
+                if (this.config.connectionArgs && this.config.connectionArgs.length > 0) {
+                    process.argv = ['node', 'winccoa-debug-adapter', ...this.config.connectionArgs];
+                }
+
                 // Load the official Siemens winccoa-manager package.
-                // Requires the process to have been started by WinCC OA pmon.
+                // Requires WinCC OA args to be present in process.argv (see above).
                 const managerPath = this.resolveManagerPath();
                 const mod = (await import(managerPath)) as
                     | { WinccoaManager: new () => IWinccoaManager }

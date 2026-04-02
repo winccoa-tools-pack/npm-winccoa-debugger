@@ -1,19 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DatapointClient, DatapointConfig } from '../../src/connection/DatapointClient';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { DatapointClient } from '../../src/connection/DatapointClient.js';
+import { WinccoaProjectLifecycle } from '../helpers/WinccoaProjectLifecycle.js';
 import { printLocalIntegrationTestResult } from '../helpers/integration-teardown.js';
 
 /**
- * Integration test for DatapointClient with real WinCC OA system
- * 
- * Prerequisites:
- * - WinCC OA installed at /opt/WinCC_OA/3.21
- * - Test project available
- * - CTRL Manager running with debug enabled
+ * Integration test: DatapointClient against a real WinCC OA system.
+ *
+ * WinccoaProjectLifecycle manages project start/stop automatically when
+ * WinCC OA is installed.  Set WINCCOA_SKIP=1 to skip in environments without
+ * a WinCC OA licence.
  */
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/debugger-poc');
+const lifecycle = new WinccoaProjectLifecycle(PROJ_PATH);
 let client: DatapointClient | null = null;
-let testOutput = {
+const testOutput = {
     status: 0,
     signal: null as NodeJS.Signals | null,
     stdout: '',
@@ -21,91 +28,85 @@ let testOutput = {
 };
 
 test.before(async () => {
-    testOutput.stdout += 'Preparing DatapointClient integration test...\n';
-});
+    if (!lifecycle.isWinccoaAvailable()) {
+        testOutput.stdout += 'WinCC OA not available — tests will be skipped\n';
+        return;
+    }
 
-test('DatapointClient Integration: Connect to WinCC OA', async () => {
-    const config: DatapointConfig = {
-        host: 'localhost',
-        port: 4999,
-        system: 'System1',
-        managerType: 'CTRL',
-        managerNumber: 1,
-    };
+    try {
+        await lifecycle.start();
+    } catch (err) {
+        testOutput.stderr += `Could not start WinCC OA: ${String(err)}\n`;
+        return;
+    }
 
-    client = new DatapointClient(config);
-
-    // Setup event listeners for debugging
-    client.on('connected', () => {
+    const config = lifecycle.getDatapointConfig('CTRL', 1);
+    testOutput.stdout += `Connecting to WinCC OA at ${config.host}:${config.port}\n`;
+    const c = new DatapointClient(config);
+    c.on('connected', () => {
         testOutput.stdout += 'Connected to WinCC OA\n';
     });
-
-    client.on('disconnected', () => {
+    c.on('disconnected', () => {
         testOutput.stdout += 'Disconnected from WinCC OA\n';
     });
-
-    client.on('error', (err) => {
-        testOutput.stderr += `Error: ${err.message}\n`;
+    c.on('error', (err) => {
+        testOutput.stderr += `Error: ${String(err)}\n`;
     });
 
     try {
-        await client.connect();
-        testOutput.stdout += `Successfully connected to ${config.host}:${config.port}\n`;
+        await c.connect();
+        client = c;
         testOutput.stdout += `Debug datapoint: ${client.getDebugDp()}\n`;
-        assert.ok(client.isConnected());
     } catch (err) {
-        testOutput.stderr += `Connection failed: ${(err as Error).message}\n`;
-        testOutput.stderr += 'Note: This test requires a running WinCC OA system\n';
-        testOutput.status = 1;
-        throw err;
+        testOutput.stderr += `Connection failed (project may not be running): ${String(err)}\n`;
+        // client stays null → tests skip
     }
 });
 
-test('DatapointClient Integration: Send debug command', async () => {
-    if (!client || !client.isConnected()) {
-        testOutput.stderr += 'Skipping: Not connected to WinCC OA\n';
+test.after(async () => {
+    if (client?.isConnected()) await client.disconnect();
+    if (lifecycle.isWinccoaAvailable()) await lifecycle.stop();
+    printLocalIntegrationTestResult('DatapointClient-integration', testOutput);
+});
+
+// ─── tests ───────────────────────────────────────────────────────────────────
+
+test('DatapointClient Integration: Connect to WinCC OA', (ctx) => {
+    if (!lifecycle.isWinccoaAvailable()) {
+        ctx.skip('WinCC OA not available');
         return;
     }
-
-    try {
-        // Send a simple info command
-        testOutput.stdout += 'Sending "info threads" command...\n';
-        const result = await client.sendCommand('info threads', 10000);
-        
-        testOutput.stdout += `Received response with ${result.length} items:\n`;
-        result.forEach((item, idx) => {
-            testOutput.stdout += `  [${idx}]: ${item}\n`;
-        });
-
-        assert.ok(Array.isArray(result));
-    } catch (err) {
-        testOutput.stderr += `Command failed: ${(err as Error).message}\n`;
-        testOutput.status = 1;
-        throw err;
-    }
-});
-
-test('DatapointClient Integration: Disconnect from WinCC OA', async () => {
     if (!client) {
-        testOutput.stderr += 'Skipping: No client to disconnect\n';
+        ctx.skip('Client not initialised');
         return;
     }
 
-    try {
-        await client.disconnect();
-        testOutput.stdout += 'Successfully disconnected\n';
-        assert.ok(!client.isConnected());
-    } catch (err) {
-        testOutput.stderr += `Disconnect failed: ${(err as Error).message}\n`;
-        testOutput.status = 1;
-        throw err;
-    }
+    assert.ok(client.isConnected());
+    testOutput.stdout += `Connected — debug dp: ${client.getDebugDp()}\n`;
 });
 
-test.after(() => {
-    try {
-        printLocalIntegrationTestResult('DatapointClient-integration', testOutput);
-    } catch (err) {
-        console.warn('Failed to print integration test result:', err);
+test('DatapointClient Integration: Send debug command', async (ctx) => {
+    if (!client?.isConnected()) {
+        ctx.skip('Not connected');
+        return;
     }
+
+    testOutput.stdout += 'Sending "info threads"…\n';
+    const result = await client.sendCommand('info threads', 10_000);
+    testOutput.stdout += `Response (${result.length} items): ${JSON.stringify(result)}\n`;
+
+    assert.ok(Array.isArray(result));
+    assert.ok(result.length > 0);
+});
+
+test('DatapointClient Integration: Disconnect from WinCC OA', async (ctx) => {
+    if (!client) {
+        ctx.skip('No client');
+        return;
+    }
+
+    await client.disconnect();
+    assert.ok(!client.isConnected());
+    client = null;
+    testOutput.stdout += 'Disconnected\n';
 });

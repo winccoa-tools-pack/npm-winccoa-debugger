@@ -1,7 +1,7 @@
 [general]
-pvss_path = "<WinCC_OA_PATH>"
-proj_path = "<WinCC_OA_PATH>/TestFramework_<WinCC_OA_VERSION>"
-proj_version = "<WinCC_OA_VERSION>"
+pvss_path = "/opt/WinCC_OA/3.21"
+proj_path = "/opt/WinCC_OA/3.21/TestFramework_3.21"
+proj_version = "3.21"
 
 distributed = 0
 distPeer = ""
