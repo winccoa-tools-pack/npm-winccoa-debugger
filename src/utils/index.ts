@@ -1,6 +1,8 @@
 /**
- * Utility Functions
- * Core utility functions
+ * Utility Components
+ * 
+ * This module provides utility functions for the debug adapter.
  */
 
-// export * from './winccoa-components';
+export { Logger, LogLevel, logger } from './Logger.js';
+export { TypeMapper } from './TypeMapper.js';

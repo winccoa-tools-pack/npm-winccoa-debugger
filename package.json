@@ -1,7 +1,7 @@
 {
-  "name": "@winccoa-tools-pack/npm-winccoa-template",
-  "version": "0.2.0",
-  "description": "Template for WinCC OA npm packages",
+  "name": "@winccoa-tools-pack/winccoa-debug-adapter",
+  "version": "0.1.0",
+  "description": "Debug Adapter Protocol implementation for WinCC OA CTRL debugging",
   "author": "winccoa-tools-pack",
   "license": "MIT",
   "main": "dist/cjs/index.js",
@@ -13,19 +13,24 @@
       "require": "./dist/cjs/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./utils/*": {
-      "import": "./dist/esm/utils/*.js",
-      "require": "./dist/cjs/utils/*.js",
-      "types": "./dist/utils/*.d.ts"
+    "./adapter": {
+      "import": "./dist/esm/adapter/index.js",
+      "require": "./dist/cjs/adapter/index.js",
+      "types": "./dist/adapter/index.d.ts"
     },
-    "./types/*": {
-      "import": "./dist/esm/types/*.js",
-      "require": "./dist/cjs/types/*.js",
-      "types": "./dist/types/*.d.ts"
+    "./protocol": {
+      "import": "./dist/esm/protocol/index.js",
+      "require": "./dist/cjs/protocol/index.js",
+      "types": "./dist/protocol/index.d.ts"
+    },
+    "./connection": {
+      "import": "./dist/esm/connection/index.js",
+      "require": "./dist/cjs/connection/index.js",
+      "types": "./dist/connection/index.d.ts"
     }
   },
   "bin": {
-    "winccoa-pnl-xml": "./dist/cjs/cli.js"
+    "winccoa-debug-adapter": "./dist/cjs/cli.js"
   },
   "files": [
     "dist"
@@ -51,7 +56,9 @@
     "ci:integration": "npm ci && npm run build && npm run test:integration"
   },
   "dependencies": {
-    "@winccoa-tools-pack/npm-winccoa-core": "^0.2.6"
+    "@winccoa-tools-pack/npm-winccoa-core": "^0.2.6",
+    "@vscode/debugadapter": "^1.68.0",
+    "@vscode/debugprotocol": "^1.68.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
