@@ -3,8 +3,9 @@
  * CLI for WinCC OA Debug Adapter
  *
  * Usage:
- *   winccoa-debug-adapter --host localhost --port 4999 --system System1 --manager ctrl:1
- *   winccoa-debug-adapter --stdio   # Run as DAP server on stdin/stdout
+ *   winccoa-debug-adapter --project DevEnv3.21 --system System1 --manager ctrl:1
+ *   winccoa-debug-adapter --stdio          # DAP over stdin/stdout (no bootstrap)
+ *   winccoa-debug-adapter --tcp-port 4711  # DAP over TCP (started via bootstrap.js)
  */
 
 import { DatapointClient, DatapointConfig } from './connection/DatapointClient';
@@ -13,9 +14,14 @@ import { WinCCDebugSession } from './adapter/WinCCDebugSession';
 interface CLIArgs {
     host?: string;
     port?: number;
-    system?: string;
+    project?: string; // WinCC OA project name for -proj arg (e.g. DevEnv3.21)
+    system?: string;  // WinCC OA system name for DP prefix (e.g. System1)
     manager?: string; // Format: "ctrl:1" or "ui:5"
+    user?: string;    // WinCC OA username
+    pass?: string;    // WinCC OA password
     stdio?: boolean;
+    tcpPort?: number; // DAP over TCP (used when started via bootstrap.js)
+    testConnect?: boolean;
 }
 
 function parseArgs(args: string[]): CLIArgs {
@@ -31,14 +37,29 @@ function parseArgs(args: string[]): CLIArgs {
             case '--port':
                 result.port = parseInt(args[++i], 10);
                 break;
+            case '--project':
+                result.project = args[++i];
+                break;
             case '--system':
                 result.system = args[++i];
                 break;
             case '--manager':
                 result.manager = args[++i];
                 break;
+            case '--user':
+                result.user = args[++i];
+                break;
+            case '--pass':
+                result.pass = args[++i];
+                break;
             case '--stdio':
                 result.stdio = true;
+                break;
+            case '--tcp-port':
+                result.tcpPort = parseInt(args[++i], 10);
+                break;
+            case '--test-connect':
+                result.testConnect = true;
                 break;
             case '--help':
             case '-h':
@@ -51,88 +72,118 @@ function parseArgs(args: string[]): CLIArgs {
 }
 
 function printUsage() {
-    console.log(`
+    process.stderr.write(`
 WinCC OA Debug Adapter
 
 Usage:
   winccoa-debug-adapter [options]
 
 Options:
+  --project <name>     WinCC OA project name (e.g. DevEnv3.21)
+  --system <name>      WinCC OA system name for DP prefix (default: System1)
   --host <host>        WinCC OA host (default: localhost)
   --port <port>        WinCC OA dist port (default: 4999)
-  --system <system>    WinCC OA system name (default: System1)
-  --manager <type:num> Manager to debug (e.g., ctrl:1, ui:5)
-  --stdio              Run as DAP server on stdin/stdout
+  --manager <type:num> Manager to debug (e.g., ctrl:1)
+  --stdio              Run DAP server on stdin/stdout (no bootstrap)
+  --tcp-port <port>    Run DAP server on TCP port (use with bootstrap.js)
+  --test-connect       Test WinCC OA connection and exit
   --help, -h           Show this help
-
-Examples:
-  # Test connection to CTRL manager 1
-  winccoa-debug-adapter --host localhost --port 4999 --system System1 --manager ctrl:1
-
-  # Run as DAP server
-  winccoa-debug-adapter --stdio
 `);
 }
 
 async function runInteractiveMode(config: DatapointConfig) {
-    console.log('WinCC OA Debug Adapter - Interactive Mode');
-    console.log('Connecting to:', config);
+    process.stderr.write('WinCC OA Debug Adapter - Interactive Mode\n');
+    process.stderr.write('Connecting to: ' + JSON.stringify(config) + '\n');
 
     const client = new DatapointClient(config);
 
     client.on('connected', () => {
-        console.log('✓ Connected to WinCC OA');
-        console.log('  Debug datapoint:', client.getDebugDp());
+        process.stderr.write('✓ Connected to WinCC OA\n');
+        process.stderr.write('  Debug datapoint: ' + client.getDebugDp() + '\n');
     });
 
     client.on('disconnected', () => {
-        console.log('✗ Disconnected from WinCC OA');
+        process.stderr.write('✗ Disconnected from WinCC OA\n');
     });
 
     client.on('error', (err) => {
-        console.error('Error:', err.message);
+        process.stderr.write('Error: ' + (err as Error).message + '\n');
     });
 
     client.on('message', (msg) => {
-        console.log('Unsolicited message:', msg);
+        process.stderr.write('Unsolicited message: ' + JSON.stringify(msg) + '\n');
     });
 
     try {
         await client.connect();
 
-        // Simple test: query threads
-        console.log('\nSending test command: info threads');
-        const result = await client.sendCommand('info threads', 5000);
-        console.log('Result:', result);
+        // Simple test: query info breakpoints (works even without active debug stop)
+        process.stderr.write('\nSending test command: info breakpoints\n');
+        const result = await client.sendCommand('info breakpoints', 5000);
+        process.stderr.write('Result: ' + JSON.stringify(result) + '\n');
 
         await client.disconnect();
-        console.log('\nTest completed successfully');
+        process.stderr.write('\nTest completed successfully\n');
         process.exit(0);
     } catch (err) {
-        console.error('Failed:', (err as Error).message);
+        process.stderr.write('Failed: ' + (err as Error).message + '\n');
         process.exit(1);
     }
 }
 
 function runStdioMode(): void {
     // Start the DAP session: reads from stdin, writes to stdout.
-    // VS Code will send initialize + attach requests containing the
-    // WinCC OA connection details (host, port, system, manager).
+    // Only use this when NOT started via bootstrap.js (stdout is clean).
+    WinCCDebugSession.run(WinCCDebugSession);
+}
+
+function runTcpMode(tcpPort: number): void {
+    // The @vscode/debugadapter runDebugAdapter helper already supports TCP server
+    // mode when '--server=PORT' is in process.argv. We inject that flag so that
+    // WinCCDebugSession.run() picks it up and starts a TCP listener on the given port.
+    // Used when the adapter is started via bootstrap.js (stdout redirected to stderr).
+    process.argv.push(`--server=${tcpPort}`);
     WinCCDebugSession.run(WinCCDebugSession);
 }
 
 async function main() {
-    const args = parseArgs(process.argv.slice(2));
+    process.stderr.write('[winccoa-debugger] Starting, process.argv: ' + process.argv.join(' ') + '\n');
+
+    // bootstrap.js shifts process.argv so argv[0] = our script, argv[1] = first flag.
+    // Normal invocation: argv[0]=node, argv[1]=script, argv[2+]=flags.
+    const flagStart = process.argv.findIndex(a => a.startsWith('--') || a === '-h');
+    const args = parseArgs(flagStart >= 0 ? process.argv.slice(flagStart) : []);
+
+    process.stderr.write('[winccoa-debugger] Parsed args: ' + JSON.stringify(args) + '\n');
 
     if (args.stdio) {
-        await runStdioMode();
+        runStdioMode();
         return;
     }
 
-    // Parse manager type and number
+    if (args.tcpPort) {
+        // Started via bootstrap.js — WinCC OA connection is already established.
+        // Just open the TCP server for VS Code to connect.
+        runTcpMode(args.tcpPort);
+        return;
+    }
+
+    if (args.testConnect) {
+        // Started via bootstrap.js for connection testing.
+        const config: DatapointConfig = {
+            host: args.host || 'localhost',
+            port: args.port || 4999,
+            system: args.system || 'System1',
+            managerType: 'CTRL',
+            managerNumber: 1,
+        };
+        await runInteractiveMode(config);
+        return;
+    }
+
+    // Direct invocation (not via bootstrap) — inject connectionArgs.
     let managerType: DatapointConfig['managerType'] = 'CTRL';
     let managerNumber = 1;
-
     if (args.manager) {
         const [type, num] = args.manager.split(':');
         managerType = type.toUpperCase() as DatapointConfig['managerType'];
@@ -145,22 +196,21 @@ async function main() {
         system: args.system || 'System1',
         managerType,
         managerNumber,
-        // winccoa-manager native addon reads these from process.argv.
-        // Inject them explicitly when not started by pmon.
         connectionArgs: [
-            '-proj', args.system || 'System1',
+            '-proj', args.project || args.system || 'System1',
             '-host', args.host || 'localhost',
             '-port', String(args.port || 4999),
             '-num',  '99',
             '-m',    'jscript',
+            ...(args.user ? ['-user', args.user, '-pass', args.pass ?? ''] : []),
         ],
     };
 
     await runInteractiveMode(config);
 }
 
-// Run CLI
 main().catch((err) => {
-    console.error('Fatal error:', err);
+    process.stderr.write('Fatal error: ' + String(err) + '\n');
     process.exit(1);
 });
+

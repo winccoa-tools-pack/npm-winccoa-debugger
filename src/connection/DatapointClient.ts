@@ -11,10 +11,13 @@
  * - Emit events for incoming messages
  *
  * Protocol:
- * - Command DPE: _CtrlDebug_CTRL_1.Command (Text)
- * - Result DPE:  _CtrlDebug_CTRL_1.Result (dyn_string)
+ * - Command DPE: System1:_CtrlDebug_CTRL_1.Command (Text)
+ * - Result DPE:  System1:_CtrlDebug_CTRL_1.Result (dyn_string)
  * - Commands are JSON:  { id: "timestamp-random", cmd: "break scripts/test.ctl 10" }
  * - Responses are JSON array: ["timestamp-random", "OK", ...lines]
+ *
+ * DPE structure is flat — no nested _CtrlDebug element.
+ * The system prefix (e.g. "System1:") is always required.
  *
  * How it works:
  * The Node.js process must be started by WinCC OA pmon (as a registered manager).
@@ -61,8 +64,13 @@ export interface IWinccoaConnection {
 }
 
 export interface DatapointConfig {
-    /** WinCC OA system name */
-    system: string;
+    /**
+     * WinCC OA system name (e.g. 'System1' or 'system1').
+     * When set, DPE names are prefixed: `<system>:_CtrlDebug_CTRL_1.Result`.
+     * When omitted or empty, no prefix is used: `_CtrlDebug_CTRL_1.Result`.
+     * Case is preserved exactly as given — WinCC OA is case-sensitive here.
+     */
+    system?: string;
     /** Host address */
     host: string;
     /** Port number */
@@ -190,9 +198,9 @@ export class DatapointClient extends EventEmitter {
 
             // Subscribe to the Result DPE to receive debugger responses.
             // Official API: dpConnect(callback, dpeNames) — callback comes FIRST.
-            // Note: Result and Command are nested under the _CtrlDebug struct element.
-            // Full path: _CtrlDebug_CTRL_1._CtrlDebug.Result
-            const resultDpe = `${this.debugDp}._CtrlDebug.Result`;
+            // DPE structure is flat: [<system>:]_CtrlDebug_CTRL_1.Result
+            // System prefix is optional — set config.system only when required.
+            const resultDpe = this.buildDpe('Result');
             this.resultSubscriptionId = this.api.dpConnect((values: any[]) => {
                 this.handleResponse(values[0]);
             }, resultDpe);
@@ -265,9 +273,11 @@ export class DatapointClient extends EventEmitter {
         try {
             // Send command via dpSet to Command DPE.
             // Official API: dpSet(dpeNames, values)
-            // Note: Command is nested under the _CtrlDebug struct element.
-            const commandDpe = `${this.debugDp}._CtrlDebug.Command`;
-            this.api.dpSet(commandDpe, JSON.stringify(command));
+            // DPE structure is flat: [<system>:]_CtrlDebug_CTRL_1.Command
+            const commandDpe = this.buildDpe('Command');
+            const payload = JSON.stringify(command);
+            process.stderr.write(`[DatapointClient] dpSet ${commandDpe} = ${payload}\n`);
+            this.api.dpSet(commandDpe, payload);
 
             // Wait for response
             return await responsePromise;
@@ -282,11 +292,16 @@ export class DatapointClient extends EventEmitter {
      */
     private handleResponse(value: any): void {
         try {
-            // Response should be a dyn_string: [id, ...result]
-            if (!Array.isArray(value) || value.length === 0) {
-                this.emit('error', new Error('Invalid response format'));
+            // Response should be a dyn_string: [id, ...result].
+            // WinCC OA fires dpConnect once immediately with the current DP value,
+            // which is null/undefined/empty on first subscribe — silently ignore.
+            if (value === null || value === undefined) {
                 return;
             }
+            if (!Array.isArray(value) || value.length === 0) {
+                return;
+            }
+            process.stderr.write(`[DatapointClient] handleResponse value: ${JSON.stringify(value)}\n`);
 
             const [id, ...result] = value as string[];
 
@@ -356,6 +371,18 @@ export class DatapointClient extends EventEmitter {
      */
     public getDebugDp(): string {
         return this.debugDp;
+    }
+
+    /**
+     * Build a fully-qualified DPE name, prepending the system prefix when configured.
+     * Examples:
+     *   system='System1' → 'System1:_CtrlDebug_CTRL_1.Result'
+     *   system='system1' → 'system1:_CtrlDebug_CTRL_1.Result'
+     *   system=undefined → '_CtrlDebug_CTRL_1.Result'
+     */
+    private buildDpe(element: 'Result' | 'Command'): string {
+        const base = `${this.debugDp}.${element}`;
+        return this.config.system ? `${this.config.system}:${base}` : base;
     }
 
     /**

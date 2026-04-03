@@ -99,8 +99,8 @@ test('DatapointClient: connect subscribes to Result DPE', async () => {
     await client.connect();
 
     // Simulate a response — the client must receive it without crashing.
-    // DPEs use the nested _CtrlDebug struct: _CtrlDebug_CTRL_1._CtrlDebug.Result
-    const resultDpe = '_CtrlDebug_CTRL_1._CtrlDebug.Result';
+    // DPEs use flat structure with system prefix: System1:_CtrlDebug_CTRL_1.Result
+    const resultDpe = 'System1:_CtrlDebug_CTRL_1.Result';
     api.simulateValue(resultDpe, ['unknown-id', 'OK']);
     // No pending command with that id, so it should emit 'message' (or silently ignore)
     assert.ok(true);
@@ -121,15 +121,15 @@ test('DatapointClient: sendCommand writes JSON to Command DPE', async () => {
     await client.connect();
 
     // Fire response after a tick.
-    // DPEs use the nested _CtrlDebug struct path inside the datapoint.
+    // DPEs use flat structure with system prefix: System1:_CtrlDebug_CTRL_1.Command
     setTimeout(() => {
-        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1._CtrlDebug.Command');
+        const raw = api.writtenValues.get('System1:_CtrlDebug_CTRL_1.Command');
         assert.ok(raw, 'Command DPE should have been written');
         const cmd = JSON.parse(raw);
         assert.ok(cmd.id, 'Command must have an id');
         assert.equal(cmd.cmd, 'break scripts/debugTest.ctl 10');
         // Simulate WinCC OA response
-        api.simulateValue('_CtrlDebug_CTRL_1._CtrlDebug.Result', [cmd.id, 'OK', 'Breakpoint set at line 10']);
+        api.simulateValue('System1:_CtrlDebug_CTRL_1.Result', [cmd.id, 'OK', 'Breakpoint set at line 10']);
     }, 10);
 
     const result = await client.sendCommand('break scripts/debugTest.ctl 10');
@@ -141,9 +141,9 @@ test('DatapointClient: sendCommand returns parsed response array', async () => {
     await client.connect();
 
     setTimeout(() => {
-        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1._CtrlDebug.Command');
+        const raw = api.writtenValues.get('System1:_CtrlDebug_CTRL_1.Command');
         const cmd = JSON.parse(raw);
-        api.simulateValue('_CtrlDebug_CTRL_1._CtrlDebug.Result', [cmd.id, 'thread1', 'thread2', 'thread3']);
+        api.simulateValue('System1:_CtrlDebug_CTRL_1.Result', [cmd.id, 'thread1', 'thread2', 'thread3']);
     }, 10);
 
     const result = await client.sendCommand('info threads');
@@ -202,3 +202,32 @@ test('DatapointClient: handles connection errors', async () => {
     assert.ok(threw, 'connect() without WinCC OA should throw');
 });
 
+test('DatapointClient: uses system prefix in DPE names when system is set', async () => {
+    const { client, api } = makeConnectedClient({ system: 'System1' });
+    await client.connect();
+
+    setTimeout(() => {
+        const raw = api.writtenValues.get('System1:_CtrlDebug_CTRL_1.Command');
+        assert.ok(raw, 'DPE should be written with system prefix');
+        const cmd = JSON.parse(raw);
+        api.simulateValue('System1:_CtrlDebug_CTRL_1.Result', [cmd.id, 'OK']);
+    }, 10);
+
+    const result = await client.sendCommand('test');
+    assert.deepEqual(result, ['OK']);
+});
+
+test('DatapointClient: omits system prefix in DPE names when system is not set', async () => {
+    const { client, api } = makeConnectedClient({ system: undefined });
+    await client.connect();
+
+    setTimeout(() => {
+        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1.Command');
+        assert.ok(raw, 'DPE should be written without system prefix');
+        const cmd = JSON.parse(raw);
+        api.simulateValue('_CtrlDebug_CTRL_1.Result', [cmd.id, 'OK']);
+    }, 10);
+
+    const result = await client.sendCommand('test');
+    assert.deepEqual(result, ['OK']);
+});

@@ -38,7 +38,13 @@ import { DebugProtocol } from '@vscode/debugprotocol';
 import { DatapointClient, DatapointConfig } from '../connection/DatapointClient';
 
 export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
-    /** WinCC OA system name */
+    /**
+     * WinCC OA project name — passed as `-proj <project>` when the adapter connects.
+     * Typically the project directory base name, e.g. `DevEnv3.21`.
+     * When omitted, `system` is used as a fallback (for backward compatibility).
+     */
+    project?: string;
+    /** WinCC OA system name (used as DP prefix, e.g. `System1:`) */
     system: string;
     /** Host where WinCC OA is running */
     host: string;
@@ -62,7 +68,13 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
 }
 
 export interface AttachRequestArguments extends DebugProtocol.AttachRequestArguments {
-    /** WinCC OA system name */
+    /**
+     * WinCC OA project name — passed as `-proj <project>` when the adapter connects.
+     * Typically the project directory base name, e.g. `DevEnv3.21`.
+     * When omitted, `system` is used as a fallback (for backward compatibility).
+     */
+    project?: string;
+    /** WinCC OA system name (used as DP prefix, e.g. `System1:`) */
     system: string;
     /** Host where WinCC OA is running */
     host: string;
@@ -342,7 +354,12 @@ export class WinCCDebugSession extends DebugSession {
         this.trace = args.trace ?? false;
         this.pathMappings = args.pathMappings ?? {};
 
+        // system = WinCC OA system name (e.g. 'System1') — used as DP prefix:
+        //   'System1:_CtrlDebug_CTRL_1.Result'
+        // project = WinCC OA project name (e.g. 'DevEnv3.21') — passed as -proj arg.
+        //   Defaults to system name if not set (single-system setups where they match).
         const system = args.system ?? 'System1';
+        const project = args.project ?? system;
         const host = args.host ?? 'localhost';
         const port = args.port ?? 4999;
         const managerType = args.manager?.type ?? 'CTRL';
@@ -361,7 +378,7 @@ export class WinCCDebugSession extends DebugSession {
             // When spawned by VS Code (not by pmon) these must be injected explicitly.
             connectionArgs: [
                 '-proj',
-                system,
+                project,  // project name (e.g. DevEnv3.21), not the system name
                 '-host',
                 host,
                 '-port',
@@ -374,7 +391,7 @@ export class WinCCDebugSession extends DebugSession {
         };
 
         this.log(
-            `Connecting to ${host}:${port} system=${system} manager=${managerType}:${managerNumber} adapterNum=${adapterNum}`,
+            `Connecting to ${host}:${port} project=${project} system=${system} manager=${managerType}:${managerNumber} adapterNum=${adapterNum}`,
         );
 
         const client = this.createDatapointClient(config);

@@ -35,20 +35,35 @@ try {
   const { WinccoaManager } = 'default' in mod ? mod.default : mod;
   api = new WinccoaManager();
   console.log('[test] WinccoaManager created');
+
+  // IMPORTANT: Start the dispatch loop (same fix as in DatapointClient.ts).
+  // Without this, the WinCC OA event loop doesn't run and dpConnect/dpGet
+  // will fail with "DP does not exist" even when DPs exist.
+  const connBindingPath = `/opt/WinCC_OA/3.21/javascript/winccoa-manager/lib/connection-binding.js`;
+  const { createRequire: cr } = await import('module');
+  const req = cr(import.meta.url);
+  const { ConnectionBinding } = req(connBindingPath);
+  const started = ConnectionBinding.instance.start();
+  console.log('[test] ConnectionBinding.start() =', started);
 } catch (err) {
   console.error('[test] Failed to create WinccoaManager:', err.message);
   process.exit(1);
 }
 
-// Wait a moment for the connection to stabilize
-await new Promise(r => setTimeout(r, 500));
+// Wait for the dispatch loop + manager registration to complete
+await new Promise(r => setTimeout(r, 2000));
 
-// Test candidates — try both old (flat) and new (nested _CtrlDebug struct) paths
+// Test candidates:
+// - flat DPE (no system prefix)
+// - with System1: prefix (capital S)
+// - with system1: prefix (lowercase s)
 const candidates = [
-  `_CtrlDebug_CTRL_${CTRL_NUM}._CtrlDebug.Result`,
-  `_CtrlDebug_CTRL_${CTRL_NUM}._CtrlDebug.Command`,
   `_CtrlDebug_CTRL_${CTRL_NUM}.Result`,
   `_CtrlDebug_CTRL_${CTRL_NUM}.Command`,
+  `System1:_CtrlDebug_CTRL_${CTRL_NUM}.Result`,
+  `System1:_CtrlDebug_CTRL_${CTRL_NUM}.Command`,
+  `system1:_CtrlDebug_CTRL_${CTRL_NUM}.Result`,
+  `system1:_CtrlDebug_CTRL_${CTRL_NUM}.Command`,
 ];
 
 console.log('\n[test] Testing dpConnect for each candidate...');
@@ -71,9 +86,10 @@ for (const dpe of candidates) {
   }
 }
 
-// Also try a dpGet to check if DP is readable
-console.log('\n[test] Testing dpGet...');
-for (const dpe of candidates.slice(0, 2)) {
+// Also try dpGet on the Result DPEs to check readability
+console.log('\n[test] Testing dpGet on Result DPEs...');
+const resultDpes = candidates.filter(c => c.endsWith('.Result'));
+for (const dpe of resultDpes) {
   try {
     // dpGet is not async in all versions, try dpGetPeriod if available
     if (typeof api.dpGet === 'function') {
