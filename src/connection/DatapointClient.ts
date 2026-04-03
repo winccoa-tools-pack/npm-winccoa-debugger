@@ -165,14 +165,47 @@ export class DatapointClient extends EventEmitter {
                     | { default: { WinccoaManager: new () => IWinccoaManager } };
                 const { WinccoaManager } = 'default' in mod ? mod.default : mod;
                 this.api = new WinccoaManager();
+
+                // Start the ConnectionBinding dispatch loop.
+                // When pmon launches the process, bootstrap.js calls
+                // ConnectionBinding.instance.start() automatically.
+                // When the process is spawned directly (e.g., VS Code spawning
+                // cli.js --stdio), bootstrap.js is NOT used, so we must call
+                // start() ourselves to:
+                //   1) register this process as a WinCC OA manager (managerStart)
+                //   2) begin the setImmediate-based dispatch loop so dpConnect
+                //      callbacks are delivered.
+                // start() is idempotent — a second call returns false and is a no-op.
+                const connBindingPath = path.join(
+                    path.dirname(managerPath),
+                    'lib',
+                    'connection-binding.js',
+                );
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { ConnectionBinding } = require(connBindingPath) as {
+                    ConnectionBinding: { instance: { start(): boolean } };
+                };
+                ConnectionBinding.instance.start();
             }
 
             // Subscribe to the Result DPE to receive debugger responses.
             // Official API: dpConnect(callback, dpeNames) — callback comes FIRST.
-            const resultDpe = `${this.debugDp}.Result`;
+            // Note: Result and Command are nested under the _CtrlDebug struct element.
+            // Full path: _CtrlDebug_CTRL_1._CtrlDebug.Result
+            const resultDpe = `${this.debugDp}._CtrlDebug.Result`;
             this.resultSubscriptionId = this.api.dpConnect((values: any[]) => {
                 this.handleResponse(values[0]);
             }, resultDpe);
+
+            // dpConnect returns -1 when the DPE does not exist or the subscription
+            // failed.  Treat this as a hard error so callers get a clear message
+            // rather than a hanging connection that never delivers callbacks.
+            if (this.resultSubscriptionId < 0) {
+                throw new Error(
+                    `dpConnect failed for "${resultDpe}" (returned ${this.resultSubscriptionId}). ` +
+                    `Ensure the CTRL manager is running and debug datapoints are initialised.`,
+                );
+            }
 
             this.connected = true;
             this.emit('connected');
@@ -232,7 +265,8 @@ export class DatapointClient extends EventEmitter {
         try {
             // Send command via dpSet to Command DPE.
             // Official API: dpSet(dpeNames, values)
-            const commandDpe = `${this.debugDp}.Command`;
+            // Note: Command is nested under the _CtrlDebug struct element.
+            const commandDpe = `${this.debugDp}._CtrlDebug.Command`;
             this.api.dpSet(commandDpe, JSON.stringify(command));
 
             // Wait for response
@@ -330,9 +364,9 @@ export class DatapointClient extends EventEmitter {
      */
     private resolveManagerPath(): string {
         // Try the well-known default path first
-        const defaultPath = '/opt/WinCC_OA/3.21/javascript/winccoa-manager';
-        if (fs.existsSync(defaultPath)) {
-            return defaultPath;
+        const defaultDir = '/opt/WinCC_OA/3.21/javascript/winccoa-manager';
+        if (fs.existsSync(defaultDir)) {
+            return path.join(defaultDir, 'index.js');
         }
 
         // Fall back to npm-winccoa-core for version discovery
@@ -350,6 +384,6 @@ export class DatapointClient extends EventEmitter {
             throw new Error(`WinCC OA installation path not found for version ${version}`);
         }
 
-        return path.join(installPath, 'javascript', 'winccoa-manager');
+        return path.join(installPath, 'javascript', 'winccoa-manager', 'index.js');
     }
 }

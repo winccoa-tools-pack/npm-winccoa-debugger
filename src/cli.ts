@@ -8,6 +8,7 @@
  */
 
 import { DatapointClient, DatapointConfig } from './connection/DatapointClient';
+import { WinCCDebugSession } from './adapter/WinCCDebugSession';
 
 interface CLIArgs {
     host?: string;
@@ -113,10 +114,11 @@ async function runInteractiveMode(config: DatapointConfig) {
     }
 }
 
-async function runStdioMode() {
-    console.error('DAP stdio mode not implemented yet');
-    console.error('Use WinCCDebugSession class for DAP server functionality');
-    process.exit(1);
+function runStdioMode(): void {
+    // Start the DAP session: reads from stdin, writes to stdout.
+    // VS Code will send initialize + attach requests containing the
+    // WinCC OA connection details (host, port, system, manager).
+    WinCCDebugSession.run(WinCCDebugSession);
 }
 
 async function main() {
@@ -143,6 +145,15 @@ async function main() {
         system: args.system || 'System1',
         managerType,
         managerNumber,
+        // winccoa-manager native addon reads these from process.argv.
+        // Inject them explicitly when not started by pmon.
+        connectionArgs: [
+            '-proj', args.system || 'System1',
+            '-host', args.host || 'localhost',
+            '-port', String(args.port || 4999),
+            '-num',  '99',
+            '-m',    'jscript',
+        ],
     };
 
     await runInteractiveMode(config);

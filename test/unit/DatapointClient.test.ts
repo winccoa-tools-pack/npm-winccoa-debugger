@@ -98,8 +98,9 @@ test('DatapointClient: connect subscribes to Result DPE', async () => {
 
     await client.connect();
 
-    // Simulate a response — the client must receive it without crashing
-    const resultDpe = '_CtrlDebug_CTRL_1.Result';
+    // Simulate a response — the client must receive it without crashing.
+    // DPEs use the nested _CtrlDebug struct: _CtrlDebug_CTRL_1._CtrlDebug.Result
+    const resultDpe = '_CtrlDebug_CTRL_1._CtrlDebug.Result';
     api.simulateValue(resultDpe, ['unknown-id', 'OK']);
     // No pending command with that id, so it should emit 'message' (or silently ignore)
     assert.ok(true);
@@ -119,15 +120,16 @@ test('DatapointClient: sendCommand writes JSON to Command DPE', async () => {
     const { client, api } = makeConnectedClient();
     await client.connect();
 
-    // Fire response after a tick
+    // Fire response after a tick.
+    // DPEs use the nested _CtrlDebug struct path inside the datapoint.
     setTimeout(() => {
-        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1.Command');
+        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1._CtrlDebug.Command');
         assert.ok(raw, 'Command DPE should have been written');
         const cmd = JSON.parse(raw);
         assert.ok(cmd.id, 'Command must have an id');
         assert.equal(cmd.cmd, 'break scripts/debugTest.ctl 10');
         // Simulate WinCC OA response
-        api.simulateValue('_CtrlDebug_CTRL_1.Result', [cmd.id, 'OK', 'Breakpoint set at line 10']);
+        api.simulateValue('_CtrlDebug_CTRL_1._CtrlDebug.Result', [cmd.id, 'OK', 'Breakpoint set at line 10']);
     }, 10);
 
     const result = await client.sendCommand('break scripts/debugTest.ctl 10');
@@ -139,9 +141,9 @@ test('DatapointClient: sendCommand returns parsed response array', async () => {
     await client.connect();
 
     setTimeout(() => {
-        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1.Command');
+        const raw = api.writtenValues.get('_CtrlDebug_CTRL_1._CtrlDebug.Command');
         const cmd = JSON.parse(raw);
-        api.simulateValue('_CtrlDebug_CTRL_1.Result', [cmd.id, 'thread1', 'thread2', 'thread3']);
+        api.simulateValue('_CtrlDebug_CTRL_1._CtrlDebug.Result', [cmd.id, 'thread1', 'thread2', 'thread3']);
     }, 10);
 
     const result = await client.sendCommand('info threads');
