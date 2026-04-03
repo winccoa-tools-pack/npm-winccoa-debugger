@@ -145,9 +145,10 @@ export class WinCCDebugSession extends DebugSession {
     private toWinCCOAPath(vscodePath: string): string {
         for (const [local, remote] of Object.entries(this.pathMappings)) {
             if (vscodePath.startsWith(local)) {
-                return vscodePath.slice(local.length).replace(/\\/g, '/').replace(/^\//, '') === ''
-                    ? remote
-                    : remote + vscodePath.slice(local.length).replace(/\\/g, '/');
+                // Strip the local prefix, then prepend the remote base.
+                // Resulting relative path must NOT have a leading slash.
+                const rel = vscodePath.slice(local.length).replace(/\\/g, '/').replace(/^\//, '');
+                return remote ? `${remote}/${rel}` : rel;
             }
         }
         return vscodePath;
@@ -156,8 +157,14 @@ export class WinCCDebugSession extends DebugSession {
     /** Map a WinCC OA remote path back to the VS Code local path */
     private toVSCodePath(wccoaPath: string): string {
         for (const [local, remote] of Object.entries(this.pathMappings)) {
-            if (wccoaPath.startsWith(remote)) {
-                return local + wccoaPath.slice(remote.length);
+            if (remote === '') {
+                // Empty remote = scripts are addressed without any prefix.
+                // Prepend the local dir directly.
+                return local + '/' + wccoaPath.replace(/^\//, '');
+            }
+            if (wccoaPath.startsWith(remote + '/') || wccoaPath === remote) {
+                const rel = wccoaPath.slice(remote.length).replace(/^\//, '');
+                return local + '/' + rel;
             }
         }
         return wccoaPath;
