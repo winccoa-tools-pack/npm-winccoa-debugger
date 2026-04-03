@@ -542,8 +542,9 @@ export class WinCCDebugSession extends DebugSession {
             this.sendEvent(new TerminatedEvent());
         });
 
-        // Wait for the CTRL manager to register and initialise its debug DPs.
-        await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+        // Wait for the CTRL manager to register its debug DPs with WinCC OA.
+        // WCCOActrl connects to the Data Manager within ~12ms; 300ms is enough.
+        await new Promise<void>((resolve) => setTimeout(resolve, 300));
 
         // Attach the DatapointClient to the script's debug DP.
         this.doAttach(response, {
@@ -614,12 +615,22 @@ export class WinCCDebugSession extends DebugSession {
         const work = async () => {
             // Query the loaded scripts list to get the numeric scriptId.
             // WinCC OA identifies scripts by integer ID, not by file path.
+            // Retry up to 10 times with 200ms gaps (covers the ~300ms connect
+            // window + time for the script to begin execution and appear in
+            // 'info scripts' output).
             let scriptId = -1;
-            try {
-                const infoResult = await client.sendCommand('info scripts');
-                scriptId = this.findScriptId(infoResult, scriptBasename);
-            } catch {
-                scriptId = -1;
+            const maxAttempts = 10;
+            for (let attempt = 0; attempt < maxAttempts && scriptId === -1; attempt++) {
+                if (attempt > 0) {
+                    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+                }
+                if (!client.isConnected()) break;
+                try {
+                    const infoResult = await client.sendCommand('info scripts');
+                    scriptId = this.findScriptId(infoResult, scriptBasename);
+                } catch {
+                    // ignore, retry
+                }
             }
 
             if (scriptId === -1) {
