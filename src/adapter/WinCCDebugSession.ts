@@ -364,9 +364,6 @@ export class WinCCDebugSession extends DebugSession {
         const port = args.port ?? 4999;
         const managerType = args.manager?.type ?? 'CTRL';
         const managerNumber = args.manager?.number ?? 1;
-        // The adapter itself registers as a jscript manager in WinCC OA.
-        // Use a number that is unlikely to clash with project managers.
-        const adapterNum = args.adapterManagerNumber ?? 99;
 
         const config: DatapointConfig = {
             system,
@@ -374,24 +371,15 @@ export class WinCCDebugSession extends DebugSession {
             port,
             managerType,
             managerNumber,
-            // winccoa-manager native addon reads connection params from process.argv.
-            // When spawned by VS Code (not by pmon) these must be injected explicitly.
-            connectionArgs: [
-                '-proj',
-                project,  // project name (e.g. DevEnv3.21), not the system name
-                '-host',
-                host,
-                '-port',
-                String(port),
-                '-num',
-                String(adapterNum),
-                '-m',
-                'jscript',
-            ],
+            // DO NOT inject connectionArgs here.
+            // The adapter is always started via bootstrap.js which establishes the
+            // WinCC OA connection (ConnectionBinding.start()) before our code runs.
+            // Injecting connectionArgs would overwrite process.argv and cause a
+            // second WinccoaManager to try to re-register — connection already live.
         };
 
         this.log(
-            `Connecting to ${host}:${port} project=${project} system=${system} manager=${managerType}:${managerNumber} adapterNum=${adapterNum}`,
+            `Connecting to ${host}:${port} project=${project} system=${system} manager=${managerType}:${managerNumber}`,
         );
 
         const client = this.createDatapointClient(config);
