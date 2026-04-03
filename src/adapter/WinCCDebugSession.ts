@@ -23,7 +23,6 @@
 
 import path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
-import type { getWinCCOAInstallationPathByVersion as GetWinCCOAPathFn } from '@winccoa-tools-pack/npm-winccoa-core';
 import {
     DebugSession,
     ContinuedEvent,
@@ -480,23 +479,22 @@ export class WinCCDebugSession extends DebugSession {
         this.stopOnEntry = args.stopOnEntry ?? false;
 
         // Resolve WCCOActrl executable path.
+        // We deliberately avoid importing @winccoa-tools-pack/npm-winccoa-core here
+        // because it loads native WinCC OA bindings (winccoa-components.js) that are
+        // not available in the debug-adapter process context.
         const isWindows = process.platform === 'win32';
         const exeName = isWindows ? 'WCCOActrl.exe' : 'WCCOActrl';
         let executablePath: string;
         if (args.installPath) {
             executablePath = path.join(args.installPath, 'bin', exeName);
         } else if (args.winCCOAVersion) {
-            const { getWinCCOAInstallationPathByVersion } = (await import(
-                '@winccoa-tools-pack/npm-winccoa-core'
-            )) as { getWinCCOAInstallationPathByVersion: typeof GetWinCCOAPathFn };
-            const installDir = getWinCCOAInstallationPathByVersion(args.winCCOAVersion);
-            if (!installDir) {
-                throw new Error(
-                    `WinCC OA ${args.winCCOAVersion} not found. ` +
-                    'Set "installPath" in your launch configuration.',
-                );
-            }
-            executablePath = path.join(installDir, 'bin', exeName);
+            // Standard installation layout:
+            //   Linux:   /opt/WinCC_OA/<version>/bin/WCCOActrl
+            //   Windows: C:\Siemens\WinCC_OA\<version>\bin\WCCOActrl.exe
+            const baseDir = isWindows
+                ? `C:\\Siemens\\WinCC_OA\\${args.winCCOAVersion}`
+                : `/opt/WinCC_OA/${args.winCCOAVersion}`;
+            executablePath = path.join(baseDir, 'bin', exeName);
         } else {
             throw new Error(
                 'Cannot find WCCOActrl executable. ' +
