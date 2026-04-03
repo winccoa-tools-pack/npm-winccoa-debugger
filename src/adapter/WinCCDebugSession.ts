@@ -206,26 +206,43 @@ export class WinCCDebugSession extends DebugSession {
     /**
      * Handle unsolicited messages from WinCC OA (stop events, output, etc.).
      *
-     * Expected stop format: ["stopped", reason, threadId, file?, line?]
-     *   reason: "breakpoint" | "step" | "exception" | "pause" | "entry"
-     *   threadId: stringified number, e.g. "1"
-     *   file: optional script path, e.g. "scripts/debugTest.ctl"
-     *   line: optional line number as string
+     * WinCC OA CTRL engine breakpoint/step stop format (real protocol):
+     *   msg[0] = "line: N"               — line number where execution stopped
+     *   msg[1] = "lib: LibId: -1 ..."    — lib info (may be empty / vary)
+     *   msg[2] = "ScriptId: N"           — numeric script ID
+     *   msg[3] = "ScopeId: N"            — scope ID (0 for main script)
+     *   msg[4] = "ThreadId: N (stopped)" — thread ID and state
      *
-     * Expected output format: ["output", text]
+     * Legacy/test format kept for backward compatibility:
+     *   msg[0] = "stopped", msg[1] = reason, msg[2] = threadId
      */
     private handleUnsolicitedMessage(msg: string[]): void {
         if (msg.length === 0) {
             return;
         }
 
+        // WinCC OA CTRL engine stop notification: starts with "line: N"
+        if (msg[0]?.startsWith('line: ')) {
+            // ThreadId field: "ThreadId: N (stopped)" or "ThreadId: N (running)"
+            const threadEntry = msg.find((m) => m.startsWith('ThreadId:')) ?? '';
+            const threadMatch = /ThreadId:\s*(\d+)/.exec(threadEntry);
+            const threadId = threadMatch ? parseInt(threadMatch[1], 10) : this.CTRL_THREAD_ID;
+            const isStopped = threadEntry.includes('(stopped)');
+            if (isStopped) {
+                const lineNum = parseInt(msg[0].slice(6), 10) || 0;
+                this.log(`Breakpoint/step stop at line ${lineNum}, thread ${threadId}`);
+                this.sendEvent(new StoppedEvent('breakpoint', threadId));
+            }
+            return;
+        }
+
+        // Legacy format (used in unit tests and for forward compat)
         if (msg[0] === 'stopped') {
             const reason = msg[1] ?? 'breakpoint';
             const threadId =
                 parseInt(msg[2] ?? `${this.CTRL_THREAD_ID}`, 10) || this.CTRL_THREAD_ID;
             this.log(`Stop event: reason="${reason}" thread=${threadId}`);
-            const event = new StoppedEvent(reason, threadId);
-            this.sendEvent(event);
+            this.sendEvent(new StoppedEvent(reason, threadId));
         } else if (msg[0] === 'output') {
             this.sendEvent(new OutputEvent(msg.slice(1).join('\n') + '\n', 'stdout'));
         }
@@ -568,19 +585,18 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Set breakpoints for a source file.
-     * Clears all existing breakpoints for the file first, then sets each one.
      *
-     * WinCC OA commands used:
-     *   clear <file>             — remove all breakpoints in file
-     *   break <file>:<line>      — set a breakpoint
-     * Expected response[0]: "OK" on success, "ERROR" on failure.
+     * WinCC OA uses numeric scriptIds (not file paths) for its breakpoint command.
+     * We first call "info scripts" to discover the integer scriptId for our file,
+     * then set each breakpoint with:
+     *   breakpoint {"scriptId": N, "line": M}
+     * Expected response[0]: "breakpoint set" on success.
      */
     protected setBreakPointsRequest(
         response: DebugProtocol.SetBreakpointsResponse,
         args: DebugProtocol.SetBreakpointsArguments,
     ): void {
         const sourcePath = args.source.path ?? args.source.name ?? '';
-        const wccoaPath = this.toWinCCOAPath(sourcePath);
         const requestedBps = args.breakpoints ?? [];
 
         if (!this.client?.isConnected()) {
@@ -593,20 +609,35 @@ export class WinCCDebugSession extends DebugSession {
         }
 
         const client = this.client;
+        const scriptBasename = path.basename(sourcePath);
 
         const work = async () => {
-            // Clear all breakpoints for this file before re-setting
-            await client.sendCommand(`clear ${wccoaPath}`).catch(() => {
-                /* file may not have any breakpoints yet */
-            });
+            // Query the loaded scripts list to get the numeric scriptId.
+            // WinCC OA identifies scripts by integer ID, not by file path.
+            let scriptId = -1;
+            try {
+                const infoResult = await client.sendCommand('info scripts');
+                scriptId = this.findScriptId(infoResult, scriptBasename);
+            } catch {
+                scriptId = -1;
+            }
+
+            if (scriptId === -1) {
+                this.log(`Script "${scriptBasename}" not found via info scripts — returning unverified`);
+                response.body = {
+                    breakpoints: requestedBps.map((bp) => new Breakpoint(false, bp.line)),
+                };
+                this.sendResponse(response);
+                return;
+            }
 
             const breakpoints: Breakpoint[] = [];
             for (const bp of requestedBps) {
                 try {
-                    const result = await client.sendCommand(`break ${wccoaPath}:${bp.line}`);
-                    // result[0] is "OK" on success; also accept lines containing "Breakpoint"
-                    const verified =
-                        result[0] === 'OK' || result.some((r) => /breakpoint/i.test(r));
+                    const cmd = `breakpoint ${JSON.stringify({ scriptId, line: bp.line })}`;
+                    const result = await client.sendCommand(cmd);
+                    // WinCC OA responds with "breakpoint set" on success
+                    const verified = result[0] === 'breakpoint set';
                     breakpoints.push(new Breakpoint(verified, bp.line));
                 } catch {
                     breakpoints.push(new Breakpoint(false, bp.line));
@@ -623,6 +654,25 @@ export class WinCCDebugSession extends DebugSession {
             };
             this.sendResponse(response);
         });
+    }
+
+    /**
+     * Search 'info scripts' response for a script matching the given basename.
+     * Each entry in the result looks like:
+     *   "ScriptId: N; current thread: T; scripts/fileName.ctl"  (relative)
+     *   "ScriptId: N; current thread: T; /full/path/fileName.ctl" (absolute)
+     * Returns -1 when not found.
+     */
+    private findScriptId(result: string[], basename: string): number {
+        const lowerName = basename.toLowerCase();
+        for (const line of result) {
+            if (!line.includes('ScriptId:')) continue;
+            if (line.toLowerCase().includes(lowerName)) {
+                const m = /ScriptId:\s*(\d+)/.exec(line);
+                if (m) return parseInt(m[1], 10);
+            }
+        }
+        return -1;
     }
 
     /**

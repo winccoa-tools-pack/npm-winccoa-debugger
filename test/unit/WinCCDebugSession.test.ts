@@ -211,13 +211,19 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
     // Inject the client into the session (simulate successful attach)
     (session as any).client = mock;
 
-    // clear returns OK, break returns Breakpoint confirmed
-    const results = [['OK'], ['OK', 'Breakpoint set at line 5'], ['OK', 'Breakpoint set at line 12']];
-    let callIdx = 0;
+    // info scripts returns one entry; breakpoint commands return success
+    const results: Record<string, string[]> = {};
     mock.sendCommand = async (cmd: string) => {
         mock.commands.push(cmd);
-        return results[callIdx++] ?? ['OK'];
+        if (cmd === 'info scripts') {
+            return ['ScriptId: 7; current thread: 0; scripts/test.ctl'];
+        }
+        if (cmd.startsWith('breakpoint ')) {
+            return ['breakpoint set'];
+        }
+        return ['OK'];
     };
+    void results; // suppress unused warning
 
     const response = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
     const args: DebugProtocol.SetBreakpointsArguments = {
@@ -228,9 +234,17 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
     session.setBreakPointsRequest(response, args);
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands[0].startsWith('clear '), 'Should clear file first');
-    assert.ok(mock.commands[1].includes(':5'), 'Should set bp at line 5');
-    assert.ok(mock.commands[2].includes(':12'), 'Should set bp at line 12');
+    assert.equal(mock.commands[0], 'info scripts', 'First command must be info scripts');
+    assert.ok(mock.commands[1].startsWith('breakpoint '), 'Second command must be breakpoint');
+    assert.ok(mock.commands[2].startsWith('breakpoint '), 'Third command must be breakpoint');
+
+    const bp1 = JSON.parse(mock.commands[1].slice('breakpoint '.length));
+    assert.equal(bp1.scriptId, 7, 'scriptId must be 7');
+    assert.equal(bp1.line, 5, 'line must be 5');
+
+    const bp2 = JSON.parse(mock.commands[2].slice('breakpoint '.length));
+    assert.equal(bp2.scriptId, 7);
+    assert.equal(bp2.line, 12);
 
     const bps = (session.sentResponses[0].body as DebugProtocol.SetBreakpointsResponse['body'])
         .breakpoints;
@@ -555,12 +569,19 @@ test('WinCCDebugSession: path mappings applied when setting breakpoints', async 
     (session as any).client = mock;
     (session as any).pathMappings = { '/home/dev/project/': 'scripts/' };
 
-    let clearedPath = '';
-    let breakPath = '';
+    let infoScriptsCalled = false;
+    let setBreakpointCmd = '';
     mock.sendCommand = async (cmd: string) => {
         mock.commands.push(cmd);
-        if (cmd.startsWith('clear ')) clearedPath = cmd.slice(6);
-        if (cmd.startsWith('break ')) breakPath = cmd;
+        if (cmd === 'info scripts') {
+            infoScriptsCalled = true;
+            // Return script entry with the basename that matches debugTest.ctl
+            return ['ScriptId: 3; current thread: 0; scripts/debugTest.ctl'];
+        }
+        if (cmd.startsWith('breakpoint ')) {
+            setBreakpointCmd = cmd;
+            return ['breakpoint set'];
+        }
         return ['OK'];
     };
 
@@ -571,8 +592,11 @@ test('WinCCDebugSession: path mappings applied when setting breakpoints', async 
     });
     await new Promise((r) => setImmediate(r));
 
-    assert.equal(clearedPath, 'scripts/debugTest.ctl');
-    assert.ok(breakPath.includes('scripts/debugTest.ctl:10'));
+    assert.ok(infoScriptsCalled, 'info scripts must be called to resolve scriptId');
+    assert.ok(setBreakpointCmd.startsWith('breakpoint '), 'breakpoint command must be sent');
+    const bp = JSON.parse(setBreakpointCmd.slice('breakpoint '.length));
+    assert.equal(bp.scriptId, 3, 'scriptId must match');
+    assert.equal(bp.line, 10, 'line number must match');
 });
 
 test('WinCCDebugSession: launchRequest behaves like attachRequest', async () => {

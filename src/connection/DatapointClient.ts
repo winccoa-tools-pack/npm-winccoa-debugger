@@ -312,8 +312,11 @@ export class DatapointClient extends EventEmitter {
                 this.pendingCommands.delete(id);
                 pending.resolve(result);
             } else {
-                // Unsolicited message
-                this.emit('message', result);
+                // Unsolicited event from the WinCC OA CTRL engine (e.g. breakpoint hit).
+                // The CTRL engine does NOT prepend a command uuid — the first element IS
+                // the first data field (e.g. "line: 5").  Emit the full array so event
+                // handlers receive the complete notification including that first field.
+                this.emit('message', value as string[]);
             }
         } catch (err) {
             this.emit('error', err);
