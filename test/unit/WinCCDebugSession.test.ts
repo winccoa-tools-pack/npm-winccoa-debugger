@@ -252,7 +252,7 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
     assert.equal(bps[1].verified, true);
 });
 
-test('WinCCDebugSession: continueRequest sends "continue" command', async () => {
+test('WinCCDebugSession: continueRequest sends "cont" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -262,7 +262,7 @@ test('WinCCDebugSession: continueRequest sends "continue" command', async () => 
     session.continueRequest(response, { threadId: 1 });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('continue'));
+    assert.ok(mock.commands.includes('cont'));
     assert.equal(session.sentResponses.length, 1);
     assert.equal(
         (session.sentResponses[0].body as DebugProtocol.ContinueResponse['body'])
@@ -271,7 +271,7 @@ test('WinCCDebugSession: continueRequest sends "continue" command', async () => 
     );
 });
 
-test('WinCCDebugSession: nextRequest sends "next" command', async () => {
+test('WinCCDebugSession: nextRequest sends "step over" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -281,11 +281,11 @@ test('WinCCDebugSession: nextRequest sends "next" command', async () => {
     session.nextRequest(response, { threadId: 1, granularity: 'statement' });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('next'));
+    assert.ok(mock.commands.includes('step over'));
     assert.equal(session.sentResponses.length, 1);
 });
 
-test('WinCCDebugSession: stepInRequest sends "step" command', async () => {
+test('WinCCDebugSession: stepInRequest sends "step in" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -295,11 +295,11 @@ test('WinCCDebugSession: stepInRequest sends "step" command', async () => {
     session.stepInRequest(response, { threadId: 1, granularity: 'statement' });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('step'));
+    assert.ok(mock.commands.includes('step in'));
     assert.equal(session.sentResponses.length, 1);
 });
 
-test('WinCCDebugSession: stepOutRequest sends "finish" command', async () => {
+test('WinCCDebugSession: stepOutRequest sends "step out" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -309,11 +309,11 @@ test('WinCCDebugSession: stepOutRequest sends "finish" command', async () => {
     session.stepOutRequest(response, { threadId: 1, granularity: 'statement' });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('finish'));
+    assert.ok(mock.commands.includes('step out'));
     assert.equal(session.sentResponses.length, 1);
 });
 
-test('WinCCDebugSession: pauseRequest sends "interrupt" command', async () => {
+test('WinCCDebugSession: pauseRequest sends "b" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -323,47 +323,37 @@ test('WinCCDebugSession: pauseRequest sends "interrupt" command', async () => {
     session.pauseRequest(response, { threadId: 1 });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('interrupt'));
+    assert.ok(mock.commands.includes('b'));
     assert.equal(session.sentResponses.length, 1);
 });
 
-test('WinCCDebugSession: threadsRequest returns default thread when not connected', async () => {
+test('WinCCDebugSession: threadsRequest returns default thread (id=0) when no stopState', () => {
     const session = makeSession();
     const response = makeResponse<DebugProtocol.ThreadsResponse>('threads');
 
     session.threadsRequest(response);
-    await new Promise((r) => setImmediate(r));
 
     assert.equal(session.sentResponses.length, 1);
     const threads = (session.sentResponses[0].body as DebugProtocol.ThreadsResponse['body'])
         .threads;
     assert.equal(threads.length, 1);
-    assert.equal(threads[0].id, 1);
+    assert.equal(threads[0].id, 0);
     assert.equal(threads[0].name, 'CTRL Manager');
 });
 
-test('WinCCDebugSession: threadsRequest parses GDB-style "info threads" response', async () => {
-    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
-    const session = makeSession(mock);
-    await mock.connect();
-    (session as any).client = mock;
-
-    mock.nextCommandResult = [
-        '* 1  Thread main',
-        '  2  Thread worker',
-    ];
+test('WinCCDebugSession: threadsRequest returns thread id from stopState', () => {
+    const session = makeSession();
+    // Inject stopState as if a stop event was received for thread 0, script 2
+    (session as any).stopState = { scriptId: 2, threadId: 0, scopeId: 0 };
 
     const response = makeResponse<DebugProtocol.ThreadsResponse>('threads');
     session.threadsRequest(response);
-    await new Promise((r) => setImmediate(r));
 
     const threads = (session.sentResponses[0].body as DebugProtocol.ThreadsResponse['body'])
         .threads;
-    assert.equal(threads.length, 2);
-    assert.equal(threads[0].id, 1);
-    assert.equal(threads[0].name, 'main');
-    assert.equal(threads[1].id, 2);
-    assert.equal(threads[1].name, 'worker');
+    assert.equal(threads.length, 1);
+    assert.equal(threads[0].id, 0);
+    assert.equal(threads[0].name, 'CTRL Manager');
 });
 
 test('WinCCDebugSession: stackTraceRequest parses GDB-style "bt" response', async () => {
@@ -418,13 +408,18 @@ test('WinCCDebugSession: scopesRequest returns Locals scope with variablesRefere
     assert.equal(scopes[0].expensive, false);
 });
 
-test('WinCCDebugSession: variablesRequest sends "info locals" and parses result', async () => {
+test('WinCCDebugSession: variablesRequest sends "info thread" and parses JSON result', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
     (session as any).client = mock;
 
-    mock.nextCommandResult = ['i = 5', 'result = 120'];
+    mock.nextCommandResult = [
+        'ThreadId: 0 (stopped) main',
+        'local variables:',
+        '{"const":0,"name":"i","value":{"type":"int","finalType":"int","value":5}}',
+        '{"const":0,"name":"result","value":{"type":"int","finalType":"int","value":120}}',
+    ];
 
     // First get a valid variablesReference via scopesRequest
     const scopesResp = makeResponse<DebugProtocol.ScopesResponse>('scopes');
@@ -437,7 +432,7 @@ test('WinCCDebugSession: variablesRequest sends "info locals" and parses result'
     session.variablesRequest(response, { variablesReference: varRef });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('info locals'));
+    assert.ok(mock.commands.includes('info thread'));
     const vars = (session.sentResponses[0].body as DebugProtocol.VariablesResponse['body'])
         .variables;
     assert.equal(vars.length, 2);
@@ -464,7 +459,10 @@ test('WinCCDebugSession: evaluateRequest sends "print <expr>" and returns value'
     await mock.connect();
     (session as any).client = mock;
 
-    mock.nextCommandResult = ['OK', '42'];
+    // WinCC OA 3.21 returns JSON variable object for print commands
+    mock.nextCommandResult = [
+        '{"const":0,"name":"myVar","value":{"type":"int","finalType":"int","value":42}}',
+    ];
 
     const response = makeResponse<DebugProtocol.EvaluateResponse>('evaluate');
     session.evaluateRequest(response, { expression: 'myVar', context: 'hover', frameId: 0 });

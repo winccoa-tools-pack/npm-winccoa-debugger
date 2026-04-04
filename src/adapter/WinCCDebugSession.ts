@@ -116,7 +116,13 @@ export class WinCCDebugSession extends DebugSession {
     private varHandleCounter = 1000;
 
     /** Default thread id for the CTRL manager */
-    private readonly CTRL_THREAD_ID = 1;
+    private readonly CTRL_THREAD_ID = 0;
+
+    /**
+     * Stop context captured from the last unsolicited stop event.
+     * Required to select the correct script/thread before bt/locals/print.
+     */
+    private stopState: { scriptId: number; threadId: number; scopeId: number } | null = null;
 
     constructor() {
         super();
@@ -200,7 +206,16 @@ export class WinCCDebugSession extends DebugSession {
             const isStopped = threadEntry.includes('(stopped)');
             if (isStopped) {
                 const lineNum = parseInt(msg[0].slice(6), 10) || 0;
-                this.log(`Breakpoint/step stop at line ${lineNum}, thread ${threadId}`);
+                // Capture script/scope IDs so subsequent bt/locals/print can call
+                // 'script N' + 'thread N' first (required by WinCC OA 3.21 protocol).
+                const scriptEntry = msg.find((m) => m.startsWith('ScriptId:')) ?? '';
+                const scriptMatch = /ScriptId:\s*(\d+)/.exec(scriptEntry);
+                const scriptId = scriptMatch ? parseInt(scriptMatch[1], 10) : 0;
+                const scopeEntry = msg.find((m) => m.startsWith('ScopeId:')) ?? '';
+                const scopeMatch = /ScopeId:\s*(\d+)/.exec(scopeEntry);
+                const scopeId = scopeMatch ? parseInt(scopeMatch[1], 10) : 0;
+                this.stopState = { scriptId, threadId, scopeId };
+                this.log(`Stop at line ${lineNum}, thread ${threadId}, script ${scriptId}, scope ${scopeId}`);
                 this.sendEvent(new StoppedEvent('breakpoint', threadId));
             }
             return;
@@ -221,16 +236,23 @@ export class WinCCDebugSession extends DebugSession {
     /**
      * Parse "info threads" response into Thread objects.
      *
-     * Expected GDB-like format per line: "[*] <id>  Thread <name>"
-     * e.g. "* 1  Thread main" or "  2  Thread worker"
+     * Handles both GDB-like "[*] <id>  Thread <name>" and WinCC OA format
+     * "ThreadId: N (stopped) main" or "ThreadId: N (running) main".
      * Falls back to a single default CTRL thread on parse failure.
      */
     private parseThreads(result: string[]): Thread[] {
         const threads: Thread[] = [];
         for (const line of result) {
-            const match = /\*?\s*(\d+)\s+Thread\s+(.+)/.exec(line);
-            if (match) {
-                threads.push(new Thread(parseInt(match[1], 10), match[2].trim()));
+            // WinCC OA format: "ThreadId: N (stopped) main" or "ThreadId: N (running) name"
+            const wcMatch = /ThreadId:\s*(\d+)\s+\(\w+\)\s+(.+)/.exec(line);
+            if (wcMatch) {
+                threads.push(new Thread(parseInt(wcMatch[1], 10), wcMatch[2].trim()));
+                continue;
+            }
+            // GDB-like format: "* 1  Thread main"
+            const gdbMatch = /\*?\s*(\d+)\s+Thread\s+(.+)/.exec(line);
+            if (gdbMatch) {
+                threads.push(new Thread(parseInt(gdbMatch[1], 10), gdbMatch[2].trim()));
             }
         }
         return threads.length > 0 ? threads : [new Thread(this.CTRL_THREAD_ID, 'CTRL Manager')];
@@ -239,44 +261,84 @@ export class WinCCDebugSession extends DebugSession {
     /**
      * Parse "bt" (backtrace) response into StackFrame objects.
      *
-     * Expected GDB-like format per line:
-     *   "#<id>  <funcName> (<args>) at <file>:<line>"
-     * e.g. "#0  testFunction () at scripts/debugTest.ctl:29"
+     * Handles both GDB-like "#<id>  <func>() at <file>:<line>" and
+     * WinCC OA 3.21 real format: "<funcSignature> at <absPath>:<line>"
+     * e.g. "void main() at /home/.../loop_test.ctl:26"
      */
     private parseStackFrames(result: string[]): StackFrame[] {
         const frames: StackFrame[] = [];
         for (const line of result) {
-            const match = /^#(\d+)\s+(\S+)\s*(?:\(.*?\))?\s+at\s+(.+):(\d+)/.exec(line);
-            if (match) {
-                const frameId = parseInt(match[1], 10);
-                const funcName = match[2];
-                const filePath = this.toVSCodePath(match[3].trim());
-                const lineNum = parseInt(match[4], 10);
+            // GDB format: "#N  funcName (...) at file:line"
+            const gdbMatch = /^#(\d+)\s+(\S+)(?:\s*\(.*?\))?\s+at\s+(.+):(\d+)/.exec(line);
+            if (gdbMatch) {
+                const frameId = parseInt(gdbMatch[1], 10);
+                const funcName = gdbMatch[2];
+                const filePath = this.toVSCodePath(gdbMatch[3].trim());
+                const lineNum = parseInt(gdbMatch[4], 10);
                 const fileName = filePath.split('/').pop() ?? filePath;
-                const source = new Source(fileName, filePath);
-                frames.push(new StackFrame(frameId, funcName, source, lineNum, 0));
+                frames.push(new StackFrame(frameId, funcName, new Source(fileName, filePath), lineNum, 0));
+                continue;
+            }
+            // WinCC OA real format: "funcSignature at /abs/path.ctl:N"
+            // e.g. "void main() at /home/testus/.../scripts/loop_test.ctl:26"
+            const wcMatch = /^(.+?)\s+at\s+(.+):(\d+)$/.exec(line);
+            if (wcMatch) {
+                const funcName = wcMatch[1].trim();
+                const filePath = this.toVSCodePath(wcMatch[2].trim());
+                const lineNum = parseInt(wcMatch[3], 10);
+                const fileName = filePath.split('/').pop() ?? filePath;
+                frames.push(new StackFrame(frames.length, funcName, new Source(fileName, filePath), lineNum, 0));
             }
         }
         return frames;
     }
 
     /**
-     * Parse "info locals" response into Variable objects.
+     * Parse "info thread" response into Variable objects.
      *
-     * Expected format per line: "varName = value"
-     * e.g. "i = 5" or "result = 120"
+     * WinCC OA 3.21 format (JSON per variable):
+     *   {"const":0,"name":"counter","value":{"type":"int","varType":327680,"finalType":"int","value":7}}
+     * Legacy fallback format: "varName = value"
      */
     private parseVariables(result: string[]): Variable[] {
         const variables: Variable[] = [];
         for (const line of result) {
-            const eqIdx = line.indexOf(' = ');
-            if (eqIdx !== -1) {
-                const name = line.substring(0, eqIdx).trim();
-                const value = line.substring(eqIdx + 3).trim();
-                variables.push(new Variable(name, value, 0));
+            // Try JSON format first (WinCC OA 3.21)
+            try {
+                const obj = JSON.parse(line) as Record<string, unknown>;
+                if (obj && typeof obj.name === 'string' && obj.name) {
+                    const inner = obj.value as Record<string, unknown> | null | undefined;
+                    const displayVal =
+                        inner !== null &&
+                        inner !== undefined &&
+                        typeof inner === 'object' &&
+                        'value' in inner
+                            ? String(inner.value)
+                            : String(obj.value ?? '');
+                    variables.push(new Variable(obj.name, displayVal, 0));
+                }
+            } catch {
+                // Legacy fallback: "varName = value"
+                const eqIdx = line.indexOf(' = ');
+                if (eqIdx !== -1) {
+                    const name = line.substring(0, eqIdx).trim();
+                    const value = line.substring(eqIdx + 3).trim();
+                    variables.push(new Variable(name, value, 0));
+                }
             }
         }
         return variables;
+    }
+
+    /**
+     * Select the stopped script and thread so that 'bt', 'info thread', and
+     * 'print' commands work. Must be called before any query command after a
+     * stop event. WinCC OA requires explicit 'script N' + 'thread N' selection.
+     */
+    private async attachToStopContext(client: DatapointClient): Promise<void> {
+        if (!this.stopState) return;
+        await client.sendCommand(`script ${this.stopState.scriptId}`);
+        await client.sendCommand(`thread ${this.stopState.threadId}`);
     }
 
     /**
@@ -564,7 +626,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Continue execution.
-     * WinCC OA command: "continue"
+     * WinCC OA command: "cont"
      */
     protected continueRequest(
         response: DebugProtocol.ContinueResponse,
@@ -572,7 +634,7 @@ export class WinCCDebugSession extends DebugSession {
     ): void {
         const work = async () => {
             if (this.client?.isConnected()) {
-                await this.client.sendCommand('continue').catch(() => {});
+                await this.client.sendCommand('cont').catch(() => {});
             }
             response.body = { allThreadsContinued: true };
             this.sendResponse(response);
@@ -585,8 +647,8 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step over (next line, do not enter function calls).
-     * WinCC OA command: "next"
-     * The resulting stop is delivered as an unsolicited "stopped" message.
+     * WinCC OA command: "step over"
+     * The resulting stop is delivered as an unsolicited stop event.
      */
     protected nextRequest(
         response: DebugProtocol.NextResponse,
@@ -594,7 +656,8 @@ export class WinCCDebugSession extends DebugSession {
     ): void {
         const work = async () => {
             if (this.client?.isConnected()) {
-                await this.client.sendCommand('next').catch(() => {});
+                await this.attachToStopContext(this.client).catch(() => {});
+                await this.client.sendCommand('step over').catch(() => {});
             }
             this.sendResponse(response);
         };
@@ -603,7 +666,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step into function call.
-     * WinCC OA command: "step"
+     * WinCC OA command: "step in"
      */
     protected stepInRequest(
         response: DebugProtocol.StepInResponse,
@@ -611,7 +674,8 @@ export class WinCCDebugSession extends DebugSession {
     ): void {
         const work = async () => {
             if (this.client?.isConnected()) {
-                await this.client.sendCommand('step').catch(() => {});
+                await this.attachToStopContext(this.client).catch(() => {});
+                await this.client.sendCommand('step in').catch(() => {});
             }
             this.sendResponse(response);
         };
@@ -620,7 +684,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step out of current function.
-     * WinCC OA command: "finish"
+     * WinCC OA command: "step out"
      */
     protected stepOutRequest(
         response: DebugProtocol.StepOutResponse,
@@ -628,7 +692,8 @@ export class WinCCDebugSession extends DebugSession {
     ): void {
         const work = async () => {
             if (this.client?.isConnected()) {
-                await this.client.sendCommand('finish').catch(() => {});
+                await this.attachToStopContext(this.client).catch(() => {});
+                await this.client.sendCommand('step out').catch(() => {});
             }
             this.sendResponse(response);
         };
@@ -637,7 +702,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Pause (break) execution.
-     * WinCC OA command: "interrupt"
+     * WinCC OA command: "b" (break/pause)
      */
     protected pauseRequest(
         response: DebugProtocol.PauseResponse,
@@ -645,7 +710,7 @@ export class WinCCDebugSession extends DebugSession {
     ): void {
         const work = async () => {
             if (this.client?.isConnected()) {
-                await this.client.sendCommand('interrupt').catch(() => {});
+                await this.client.sendCommand('b').catch(() => {});
             }
             this.sendResponse(response);
         };
@@ -654,34 +719,19 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Return the list of active threads.
-     * WinCC OA command: "info threads"
-     * Expected response lines: GDB-like "[*] <id>  Thread <name>"
-     * Falls back to a single "CTRL Manager" thread on failure.
+     * Returns the thread captured from the last stop event if available,
+     * otherwise falls back to a single "CTRL Manager" thread (id=0).
      */
     protected threadsRequest(response: DebugProtocol.ThreadsResponse): void {
-        const work = async () => {
-            if (this.client?.isConnected()) {
-                try {
-                    const result = await this.client.sendCommand('info threads', 3000);
-                    response.body = { threads: this.parseThreads(result) };
-                } catch {
-                    response.body = { threads: [new Thread(this.CTRL_THREAD_ID, 'CTRL Manager')] };
-                }
-            } else {
-                response.body = { threads: [new Thread(this.CTRL_THREAD_ID, 'CTRL Manager')] };
-            }
-            this.sendResponse(response);
-        };
-        work().catch(() => {
-            response.body = { threads: [new Thread(this.CTRL_THREAD_ID, 'CTRL Manager')] };
-            this.sendResponse(response);
-        });
+        const threadId = this.stopState?.threadId ?? this.CTRL_THREAD_ID;
+        response.body = { threads: [new Thread(threadId, 'CTRL Manager')] };
+        this.sendResponse(response);
     }
 
     /**
      * Return the call stack for a thread.
-     * WinCC OA command: "bt"
-     * Expected response lines: GDB-like "#<id>  <func> () at <file>:<line>"
+     * WinCC OA 3.21: must call 'script N' + 'thread N' first, then 'bt'.
+     * Real bt format: "void main() at /abs/path/file.ctl:26"
      */
     protected stackTraceRequest(
         response: DebugProtocol.StackTraceResponse,
@@ -693,6 +743,7 @@ export class WinCCDebugSession extends DebugSession {
                 return this.sendResponse(response);
             }
             try {
+                await this.attachToStopContext(this.client);
                 const result = await this.client.sendCommand('bt', 3000);
                 const frames = this.parseStackFrames(result);
                 response.body = { stackFrames: frames, totalFrames: frames.length };
@@ -724,8 +775,8 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Return variables for a scope or structured variable.
-     * WinCC OA command: "info locals" (for a locals scope)
-     * Expected response lines: "varName = value"
+     * WinCC OA 3.21: must call 'script N' + 'thread N' first, then 'info thread'.
+     * Response format: JSON objects per variable.
      */
     protected variablesRequest(
         response: DebugProtocol.VariablesResponse,
@@ -740,9 +791,11 @@ export class WinCCDebugSession extends DebugSession {
 
         const client = this.client;
         const work = async () => {
+            await this.attachToStopContext(client);
             let result: string[];
             if (handleInfo.type === 'locals') {
-                result = await client.sendCommand('info locals', 3000);
+                // 'info thread' returns per-thread locals as JSON objects
+                result = await client.sendCommand('info thread', 3000);
             } else {
                 result = await client.sendCommand(`print ${handleInfo.expression}`, 3000);
             }
@@ -758,8 +811,8 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Evaluate an expression (hover, REPL, watch).
-     * WinCC OA command: "print <expression>"
-     * Returns the string representation of the value.
+     * WinCC OA 3.21: requires 'script N' + 'thread N' first, then 'print <expr>'.
+     * Response: JSON variable object — extract .value.value for display.
      */
     protected evaluateRequest(
         response: DebugProtocol.EvaluateResponse,
@@ -773,14 +826,32 @@ export class WinCCDebugSession extends DebugSession {
 
         const client = this.client;
         const work = async () => {
+            await this.attachToStopContext(client);
             const result = await client.sendCommand(`print ${args.expression}`, 3000);
-            // Filter out the leading "OK" token if present
-            const value =
-                result
-                    .filter((r) => r !== 'OK')
-                    .join('\n')
-                    .trim() || '(no value)';
-            response.body = { result: value, variablesReference: 0 };
+            // Try to extract a meaningful display value from JSON response
+            let displayVal = '(no value)';
+            for (const line of result) {
+                try {
+                    const obj = JSON.parse(line) as Record<string, unknown>;
+                    if (obj && typeof obj === 'object' && 'value' in obj) {
+                        const inner = obj.value as Record<string, unknown> | null | undefined;
+                        displayVal =
+                            inner !== null &&
+                            inner !== undefined &&
+                            typeof inner === 'object' &&
+                            'value' in inner
+                                ? String(inner.value)
+                                : String(obj.value ?? '');
+                        break;
+                    }
+                } catch {
+                    // Non-JSON line — fallback to plain string if no JSON found
+                    if (displayVal === '(no value)' && line.trim() && line !== 'OK') {
+                        displayVal = line.trim();
+                    }
+                }
+            }
+            response.body = { result: displayVal, variablesReference: 0 };
             this.sendResponse(response);
         };
 
