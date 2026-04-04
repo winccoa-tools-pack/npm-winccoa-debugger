@@ -165,15 +165,20 @@ export class WinCCDebugSession extends DebugSession {
 
     /** Map a WinCC OA remote path back to the VS Code local path */
     private toVSCodePath(wccoaPath: string): string {
+        const isAbsolute = wccoaPath.startsWith('/') || /^[A-Za-z]:[/\\]/.test(wccoaPath);
         for (const [local, remote] of Object.entries(this.pathMappings)) {
             if (remote === '') {
-                // Empty remote = scripts are addressed without any prefix.
-                // Prepend the local dir directly.
-                return local + '/' + wccoaPath.replace(/^\//, '');
+                // Empty remote means OA scripts are addressed with bare filenames.
+                // If WinCC OA already returns an absolute path, no prepending needed —
+                // just return it as-is (same machine, paths are already correct).
+                if (isAbsolute) {
+                    return wccoaPath;
+                }
+                return local.replace(/\/$/, '') + '/' + wccoaPath.replace(/^\//, '');
             }
             if (wccoaPath.startsWith(remote + '/') || wccoaPath === remote) {
                 const rel = wccoaPath.slice(remote.length).replace(/^\//, '');
-                return local + '/' + rel;
+                return local.replace(/\/$/, '') + '/' + rel;
             }
         }
         return wccoaPath;
@@ -354,6 +359,10 @@ export class WinCCDebugSession extends DebugSession {
         if (this.client) {
             const c = this.client;
             this.client = null;
+            // Resume CTRL and clear breakpoints so the next session doesn't
+            // find CTRL stuck at a breakpoint or with stale breakpoints set.
+            await c.sendCommand('delete-all', 1000).catch(() => {});
+            await c.sendCommand('cont', 1000).catch(() => {});
             await c.disconnect().catch(() => {
                 /* ignore disconnect errors during cleanup */
             });
@@ -496,6 +505,17 @@ export class WinCCDebugSession extends DebugSession {
             .connect()
             .then(() => {
                 this.log(`Connected. Debug DP: ${client.getDebugDp()}`);
+                // Resume if CTRL is paused from a previous session.
+                // Short timeout: if already running cont has no response at all.
+                // If paused, CTRL responds within a few ms ("continuing").
+                return client.sendCommand('cont', 500).catch(() => {});
+            })
+            .then(() => {
+                // Clear any stale breakpoints from previous sessions before
+                // VS Code sends the new breakpoint configuration.
+                return client.sendCommand('delete-all').catch(() => {});
+            })
+            .then(() => {
                 // Respond first, then send InitializedEvent so VS Code knows
                 // we are ready to receive configuration (breakpoints, etc.)
                 this.sendResponse(response);
@@ -553,11 +573,12 @@ export class WinCCDebugSession extends DebugSession {
         const work = async () => {
             // Query the loaded scripts list to get the numeric scriptId.
             // WinCC OA identifies scripts by integer ID, not by file path.
-            // Retry up to 10 times with 200ms gaps (covers the ~300ms connect
+            // Retry up to 3 times with 200ms gaps (covers the ~300ms connect
             // window + time for the script to begin execution and appear in
-            // 'info scripts' output).
+            // 'info scripts' output). Keep low to avoid blocking the session
+            // when VS Code has stale breakpoints for non-existent scripts.
             let scriptId = -1;
-            const maxAttempts = 10;
+            const maxAttempts = 3;
             for (let attempt = 0; attempt < maxAttempts && scriptId === -1; attempt++) {
                 if (attempt > 0) {
                     await new Promise<void>((resolve) => setTimeout(resolve, 200));
@@ -583,7 +604,9 @@ export class WinCCDebugSession extends DebugSession {
             const breakpoints: Breakpoint[] = [];
             for (const bp of requestedBps) {
                 try {
-                    const cmd = `breakpoint ${JSON.stringify({ scriptId, line: bp.line })}`;
+                    // scopeId:0 and lib:-1 are required by WinCC OA 3.21 —
+                    // without them the engine accepts the command but never fires a stop event.
+                    const cmd = `breakpoint ${JSON.stringify({ scriptId, scopeId: 0, lib: -1, line: bp.line })}`;
                     const result = await client.sendCommand(cmd);
                     // WinCC OA responds with "breakpoint set" on success
                     const verified = result[0] === 'breakpoint set';
@@ -710,6 +733,9 @@ export class WinCCDebugSession extends DebugSession {
     ): void {
         const work = async () => {
             if (this.client?.isConnected()) {
+                // "b" = break/pause. WinCC OA responds with the stop event data
+                // (["line: N", ...]) using this command's ID.  DatapointClient
+                // will re-emit it as 'message' → handleUnsolicitedMessage → StoppedEvent.
                 await this.client.sendCommand('b').catch(() => {});
             }
             this.sendResponse(response);

@@ -351,6 +351,14 @@ export class DatapointClient extends EventEmitter {
             if (pending) {
                 clearTimeout(pending.timeout);
                 this.pendingCommands.delete(id);
+                // WinCC OA 3.21 prepends the last command's ID to stop events even
+                // though they are unsolicited (e.g. breakpoint hit during "b" pause).
+                // Detect this case and emit 'message' so the session can fire
+                // StoppedEvent — while still resolving the pending command promise
+                // (caller receives the stop data, which it can safely ignore).
+                if (result[0]?.startsWith('line: ')) {
+                    this.emit('message', value as string[]);
+                }
                 pending.resolve(result);
             } else {
                 // Unsolicited event from the WinCC OA CTRL engine (e.g. breakpoint hit).

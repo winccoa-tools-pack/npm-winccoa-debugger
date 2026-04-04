@@ -9,6 +9,7 @@
  *   winccoa-debug-adapter --repl           # Interactive REPL (must be started via bootstrap.js)
  */
 
+import * as net from 'net';
 import * as readline from 'readline';
 import { DatapointClient, DatapointConfig } from './connection/DatapointClient';
 import { WinCCDebugSession } from './adapter/WinCCDebugSession';
@@ -385,12 +386,21 @@ function runStdioMode(): void {
 }
 
 function runTcpMode(tcpPort: number): void {
-    // The @vscode/debugadapter runDebugAdapter helper already supports TCP server
-    // mode when '--server=PORT' is in process.argv. We inject that flag so that
-    // WinCCDebugSession.run() picks it up and starts a TCP listener on the given port.
-    // Used when the adapter is started via bootstrap.js (stdout redirected to stderr).
-    process.argv.push(`--server=${tcpPort}`);
-    WinCCDebugSession.run(WinCCDebugSession);
+    // When started via bootstrap.js, process.argv is shifted to just ['debugAdapter.js'].
+    // The @vscode/debugadapter runDebugAdapter() does process.argv.slice(2), so pushing
+    // '--server=PORT' at index 1 would be skipped. Instead, use net.createServer directly.
+    process.stderr.write(`[winccoa-debugger] Starting TCP server on port ${tcpPort}\n`);
+    net.createServer((socket) => {
+        process.stderr.write('[winccoa-debugger] Client connected\n');
+        socket.on('end', () => {
+            process.stderr.write('[winccoa-debugger] Client disconnected\n');
+        });
+        const session = new WinCCDebugSession();
+        session.setRunAsServer(true);
+        session.start(socket, socket);
+    }).listen(tcpPort, '127.0.0.1', () => {
+        process.stderr.write(`[winccoa-debugger] TCP server listening on 127.0.0.1:${tcpPort}\n`);
+    });
 }
 
 async function main() {
@@ -408,10 +418,10 @@ async function main() {
         return;
     }
 
-    if (args.tcpPort) {
+    if (args.tcpPort || !args.project) {
         // Started via bootstrap.js — WinCC OA connection is already established.
-        // Just open the TCP server for VS Code to connect.
-        runTcpMode(args.tcpPort);
+        // Use explicit --tcp-port if given, otherwise fall back to hardcoded default 7474.
+        runTcpMode(args.tcpPort ?? 7474);
         return;
     }
 
