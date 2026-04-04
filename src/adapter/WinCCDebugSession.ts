@@ -22,7 +22,6 @@
  */
 
 import path from 'path';
-import { spawn, type ChildProcess } from 'child_process';
 import {
     DebugSession,
     ContinuedEvent,
@@ -68,30 +67,6 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
     pathMappings?: Record<string, string>;
     /** Enable verbose logging to the debug console */
     trace?: boolean;
-    /**
-     * CTL script to launch (relative to project scripts folder or absolute path).
-     * When set, WCCOActrl is spawned directly to run the script and the adapter
-     * attaches to its debug DP. When omitted, falls back to attach behaviour.
-     */
-    program?: string;
-    /** If true, stop at the first line of the script before executing. */
-    stopOnEntry?: boolean;
-    /**
-     * Manager number assigned to the spawned WCCOActrl process (-num flag).
-     * Determines the debug DP name: _CtrlDebug_CTRL_<n>.
-     * Must not conflict with existing managers. Defaults to 98.
-     */
-    debugManagerNumber?: number;
-    /**
-     * WinCC OA version string (e.g. "3.21") used to locate the WCCOActrl executable.
-     * Required when `program` is set and `installPath` is not provided.
-     */
-    winCCOAVersion?: string;
-    /**
-     * Explicit path to the WinCC OA installation directory (e.g. /opt/WinCC_OA/3.21).
-     * When set, takes precedence over `winCCOAVersion` for executable lookup.
-     */
-    installPath?: string;
 }
 
 export interface AttachRequestArguments extends DebugProtocol.AttachRequestArguments {
@@ -139,11 +114,6 @@ export class WinCCDebugSession extends DebugSession {
     /** Maps variablesReference → scope descriptor */
     private readonly varHandles = new Map<number, VarHandleInfo>();
     private varHandleCounter = 1000;
-
-    /** Tracks the process spawned by launchRequest (WCCOActrl running the script). */
-    private launchedProcess: ChildProcess | undefined;
-    /** Whether the launch should stop at entry point. */
-    private stopOnEntry: boolean = false;
 
     /** Default thread id for the CTRL manager */
     private readonly CTRL_THREAD_ID = 1;
@@ -383,24 +353,22 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Launch request.
-     * If `program` is set, a temporary WCCOActrl manager is started via pmon to run
-     * the specified CTL script, then the adapter attaches to its debug DP.
-     * If `program` is absent, falls back to attach behaviour.
+     *
+     * In WinCC OA debugging, scripts must be registered as pmon managers (in config/progs)
+     * and started by pmon before debugging can begin. There is no spawn-based launch.
+     * Both launchRequest and attachRequest therefore do the same thing: connect to the
+     * debug DPs of an already-running CTRL manager.
+     *
+     * To start a manager for debugging:
+     *   1. Add it to config/progs: WCCOActrl | manual | 30 | 3 | 1 | -num 5 -f scripts/loop.ctl
+     *   2. Start it via pmon, the MCP server, or the WinCC OA Project Admin extension.
+     *   3. Then launch/attach this debug adapter with manager.number = 5.
      */
     protected launchRequest(
         response: DebugProtocol.LaunchResponse,
         args: LaunchRequestArguments,
     ): void {
-        if (args.program) {
-            this.doLaunch(response, args).catch((err: Error) => {
-                this.log(`Launch failed: ${err.message}`);
-                response.success = false;
-                response.message = err.message;
-                this.sendResponse(response);
-            });
-        } else {
-            this.doAttach(response, args);
-        }
+        this.doAttach(response, args);
     }
 
     /**
@@ -481,107 +449,15 @@ export class WinCCDebugSession extends DebugSession {
     }
 
     /**
-     * Launch a CTL script by spawning WCCOActrl directly (same as scriptactions extension).
-     * The script runs as CTRL manager `-num <debugManagerNumber>` so the adapter can
-     * subscribe to its `_CtrlDebug_CTRL_<n>.Result` debug DP.
-     *
-     * The project must already be running; this does NOT start pmon.
-     */
-    private async doLaunch(
-        response: DebugProtocol.LaunchResponse,
-        args: LaunchRequestArguments,
-    ): Promise<void> {
-        const project = args.project ?? args.system ?? '';
-        const debugManagerNum = args.debugManagerNumber ?? 98;
-        this.stopOnEntry = args.stopOnEntry ?? false;
-
-        // Resolve WCCOActrl executable path.
-        // We deliberately avoid importing @winccoa-tools-pack/npm-winccoa-core here
-        // because it loads native WinCC OA bindings (winccoa-components.js) that are
-        // not available in the debug-adapter process context.
-        const isWindows = process.platform === 'win32';
-        const exeName = isWindows ? 'WCCOActrl.exe' : 'WCCOActrl';
-        let executablePath: string;
-        if (args.installPath) {
-            executablePath = path.join(args.installPath, 'bin', exeName);
-        } else if (args.winCCOAVersion) {
-            // Standard installation layout:
-            //   Linux:   /opt/WinCC_OA/<version>/bin/WCCOActrl
-            //   Windows: C:\Siemens\WinCC_OA\<version>\bin\WCCOActrl.exe
-            const baseDir = isWindows
-                ? `C:\\Siemens\\WinCC_OA\\${args.winCCOAVersion}`
-                : `/opt/WinCC_OA/${args.winCCOAVersion}`;
-            executablePath = path.join(baseDir, 'bin', exeName);
-        } else {
-            throw new Error(
-                'Cannot find WCCOActrl executable. ' +
-                'Set "winCCOAVersion" or "installPath" in your launch configuration.',
-            );
-        }
-
-        // Build args exactly as scriptactions does:
-        //   WCCOActrl <script> -num <n> -proj <project>
-        const scriptArgs = [args.program!, '-num', String(debugManagerNum), '-proj', project];
-
-        this.log(`Spawning: ${executablePath} ${scriptArgs.join(' ')}`);
-
-        const child = spawn(executablePath, scriptArgs, {
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        this.launchedProcess = child;
-
-        child.stdout?.on('data', (d: Buffer) => {
-            this.sendEvent(new OutputEvent(d.toString(), 'stdout'));
-        });
-        child.stderr?.on('data', (d: Buffer) => {
-            this.sendEvent(new OutputEvent(d.toString(), 'stderr'));
-        });
-        child.on('exit', (code) => {
-            this.log(`WCCOActrl exited with code ${code}`);
-            this.sendEvent(new TerminatedEvent());
-        });
-
-        // Wait for the CTRL manager to register its debug DPs with WinCC OA.
-        // WCCOActrl connects to the Data Manager within ~12ms; 300ms is enough.
-        await new Promise<void>((resolve) => setTimeout(resolve, 300));
-
-        // Attach the DatapointClient to the script's debug DP.
-        this.doAttach(response, {
-            ...args,
-            manager: { type: 'CTRL', number: debugManagerNum },
-        });
-    }
-
-    /**
-     * Kill the WCCOActrl process that was spawned by doLaunch.
-     * Safe to call when no process was spawned.
-     */
-    private cleanupLaunchedProcess(): void {
-        if (this.launchedProcess) {
-            const p = this.launchedProcess;
-            this.launchedProcess = undefined;
-            try {
-                p.kill();
-            } catch {
-                /* ignore */
-            }
-        }
-    }
-
-    /**
      * Configuration done — VS Code has finished sending the initial breakpoint list.
-     * Emit ContinuedEvent so VS Code shows the "running" state for normal launches.
-     * For stopOnEntry=true the stopped event is expected to arrive from WinCC OA.
+     * Emit ContinuedEvent so VS Code shows the "running" state.
      */
     protected configurationDoneRequest(
         response: DebugProtocol.ConfigurationDoneResponse,
         _args: DebugProtocol.ConfigurationDoneArguments,
     ): void {
         this.sendResponse(response);
-        if (!this.stopOnEntry) {
-            this.sendEvent(new ContinuedEvent(this.CTRL_THREAD_ID));
-        }
+        this.sendEvent(new ContinuedEvent(this.CTRL_THREAD_ID));
     }
 
     /**
@@ -916,13 +792,11 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Disconnect — stop debugging and release the connection.
-     * Also kills and removes any pmon manager inserted by launchRequest.
      */
     protected disconnectRequest(
         response: DebugProtocol.DisconnectResponse,
         _args: DebugProtocol.DisconnectArguments,
     ): void {
-        this.cleanupLaunchedProcess();
         this.cleanupClient()
             .then(() => this.sendResponse(response))
             .catch(() => this.sendResponse(response));
@@ -930,13 +804,11 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Terminate — forcibly end the debug session.
-     * Also kills the WCCOActrl process spawned by launchRequest.
      */
     protected terminateRequest(
         response: DebugProtocol.TerminateResponse,
         _args: DebugProtocol.TerminateArguments,
     ): void {
-        this.cleanupLaunchedProcess();
         this.cleanupClient()
             .then(() => {
                 this.sendResponse(response);

@@ -23,13 +23,18 @@ export class DAPHandler {
 
     /**
      * Set breakpoint
+     * @param scriptId  Script ID from "info scripts" response
+     * @param line      1-based line number
+     * @param scopeId   Scope ID (default 0)
+     * @param lib       Library ID (default -1)
      */
     public async setBreakpoint(
-        location: string,
-        condition?: string,
-        temporary = false,
+        scriptId: number,
+        line: number,
+        scopeId = 0,
+        lib = -1,
     ): Promise<void> {
-        const cmd = CommandEncoder.encodeSetBreakpoint(location, condition, temporary);
+        const cmd = CommandEncoder.encodeSetBreakpoint(scriptId, line, scopeId, lib);
         const response = await this.datapointClient.sendCommand(cmd);
 
         if (ResponseParser.isError(response)) {
@@ -123,10 +128,38 @@ export class DAPHandler {
     }
 
     /**
-     * Pause execution
+     * Pause execution (interrupt running script).
      */
     public async pause(): Promise<void> {
         const cmd = CommandEncoder.encodePause();
         await this.datapointClient.sendCommand(cmd);
+    }
+
+    /**
+     * Select script context. Must be called after a stop event, before
+     * getStackTrace() / getLocals() / evaluate() / continue().
+     * @param scriptId  Script ID from stop event
+     */
+    public async selectScript(scriptId: number): Promise<void> {
+        const cmd = CommandEncoder.encodeSelectScript(scriptId);
+        await this.datapointClient.sendCommand(cmd);
+    }
+
+    /**
+     * Attach to stopped thread. Must be called after selectScript().
+     * @param threadId  Thread ID from stop event
+     */
+    public async selectThread(threadId: number): Promise<void> {
+        const cmd = CommandEncoder.encodeSelectThread(threadId);
+        await this.datapointClient.sendCommand(cmd);
+    }
+
+    /**
+     * Get list of loaded scripts with their ScriptIds.
+     */
+    public async getScripts(): Promise<string[]> {
+        const cmd = CommandEncoder.encodeGetScripts();
+        const response = await this.datapointClient.sendCommand(cmd);
+        return response;
     }
 }

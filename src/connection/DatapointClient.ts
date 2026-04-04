@@ -41,9 +41,14 @@ import {
  * Kept narrow so unit tests can inject a simple mock.
  */
 export interface IWinccoaManager {
-    /** Subscribe to DPE value changes. Callback receives (values, dpeNames). */
+    /**
+     * Subscribe to DPE value changes.
+     * Official WinccoaManager callback signature: (names: string[], values: unknown[], type, error?)
+     * - names[i]  = DPE name string
+     * - values[i] = actual DPE value
+     */
     dpConnect(
-        callback: (values: any[], dpeNames: string[]) => void,
+        callback: (names: string[], values: any[], type?: any, error?: any) => void,
         dpeNames: string | string[],
         answer?: boolean,
     ): number;
@@ -53,6 +58,14 @@ export interface IWinccoaManager {
     dpSet(dpeNames: string | string[], values: any | any[]): void;
     /** Write and wait until the value is confirmed by the Data Manager. */
     dpSetWait(dpeNames: string | string[], values: any | any[]): Promise<void>;
+    /**
+     * Set the active user for this manager instance.
+     * No password needed when the OS process runs as root.
+     * User ID 1 = WinCC OA built-in root user (always exists, no auth required).
+     */
+    setUserId(id: number, password?: string): boolean;
+    /** Look up a user ID by name. */
+    getUserId(userName?: string): number | undefined;
 }
 
 /** @internal — kept for backwards compat with existing tests that check IWinccoaApi */
@@ -194,16 +207,41 @@ export class DatapointClient extends EventEmitter {
                     ConnectionBinding: { instance: { start(): boolean } };
                 };
                 ConnectionBinding.instance.start();
+
+                // Authenticate so we are allowed to write to system DPs like
+                // _CtrlDebug_CTRL_5.Command (which requires user permission 4).
+                // User ID 1 = the built-in WinCC OA root/admin user.
+                // setUserId without password only works when this OS process
+                // is running as Linux root OR when the project has no server-side
+                // manager authentication enabled (the common dev-project default).
+                try {
+                    (this.api as any).setUserId(1);
+                    process.stderr.write(`[DatapointClient] setUserId(1) OK\n`);
+                } catch (e) {
+                    process.stderr.write(`[DatapointClient] setUserId(1) failed: ${(e as Error).message} — continuing anyway\n`);
+                }
             }
 
             // Subscribe to the Result DPE to receive debugger responses.
             // Official API: dpConnect(callback, dpeNames) — callback comes FIRST.
             // DPE structure is flat: [<system>:]_CtrlDebug_CTRL_1.Result
             // System prefix is optional — set config.system only when required.
+            // Official WinccoaManager dpConnect callback signature:
+            //   (names: string[], values: unknown[], type: WinccoaConnectUpdateType, error?)
+            // names[i]  = DPE name (e.g. "System1:_CtrlDebug_CTRL_5.Result")
+            // values[i] = actual DPE value (dyn_string arriving as JS string[])
             const resultDpe = this.buildDpe('Result');
-            this.resultSubscriptionId = this.api.dpConnect((values: any[]) => {
-                this.handleResponse(values[0]);
-            }, resultDpe);
+            this.resultSubscriptionId = this.api.dpConnect(
+                (names: any[], values: any[]) => {
+                    process.stderr.write(
+                        `[DatapointClient] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`,
+                    );
+                    this.handleResponse(values[0]);
+                },
+                resultDpe,
+                false,  // answer=false: do NOT fire immediately with stale current value;
+                        // only fire when .Result actually changes (= new response arrives)
+            );
 
             // dpConnect returns -1 when the DPE does not exist or the subscription
             // failed.  Treat this as a hard error so callers get a clear message
@@ -271,13 +309,16 @@ export class DatapointClient extends EventEmitter {
         });
 
         try {
-            // Send command via dpSet to Command DPE.
-            // Official API: dpSet(dpeNames, values)
-            // DPE structure is flat: [<system>:]_CtrlDebug_CTRL_1.Command
+            // Send command via dpSetWait to Command DPE.
+            // dpSetWait (vs dpSet) confirms the write was received by the Data Manager —
+            // avoids silent drops that occur when dpSet is called fire-and-forget before
+            // the WinCC OA connection has fully processed the previous operation.
+            // Official API: dpSetWait(dpeNames, values) → Promise<void>
             const commandDpe = this.buildDpe('Command');
             const payload = JSON.stringify(command);
-            process.stderr.write(`[DatapointClient] dpSet ${commandDpe} = ${payload}\n`);
-            this.api.dpSet(commandDpe, payload);
+            process.stderr.write(`[DatapointClient] dpSetWait ${commandDpe} = ${payload}\n`);
+            await this.api.dpSetWait(commandDpe, payload);
+            process.stderr.write(`[DatapointClient] dpSetWait confirmed\n`);
 
             // Wait for response
             return await responsePromise;

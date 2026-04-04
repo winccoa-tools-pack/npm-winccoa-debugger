@@ -3,43 +3,41 @@
  *
  * Encodes Debug Adapter Protocol (DAP) requests into WinCC OA debugger commands.
  *
- * Responsibilities:
- * - Convert DAP breakpoint requests to "break <location>" commands
- * - Encode step operations: "step in", "step out", "step over"
- * - Format variable inspection commands: "info locals", "info globals"
- * - Generate stack trace requests: "info stack"
- * - Create expression evaluation commands: "print <expr>"
+ * WinCC OA Command Reference (verified by POC against WinCC OA 3.21):
+ * - breakpoint {"scriptId":N,"scopeId":0,"lib":-1,"line":N}: Set breakpoint → "breakpoint set"
+ * - delete-all: Remove all breakpoints → "all breakpoints deleted"
+ * - cont: Continue execution → "continuing"  (NOT "c")
+ * - b / break: Interrupt running script (pause)
+ * - script <scriptId>: Select script context → "OK"  (required before thread)
+ * - thread <threadId>: Attach to thread → "OK"  (required for locals/bt/print)
+ * - bt: Get call stack (backtrace) → "void main() at file:line"
+ * - info thread: Get locals of current thread → JSON variable entries
+ * - info threads: List all threads
+ * - info globals: Get global variables
+ * - info scripts: List loaded scripts
+ * - print <expr>: Evaluate expression → JSON variable entry
+ * - step in / step out / step over: Step through code
  *
- * WinCC OA Command Reference:
- * - break <location>: Set breakpoint
- * - delete-all: Remove all breakpoints
- * - c / cont: Continue execution
- * - step [in|out|over]: Step through code
- * - info threads: List threads
- * - info stack: Get call stack
- * - info locals: Get local variables
- * - print <expr>: Evaluate expression
+ * Stop event format (unsolicited result):
+ * ["line: N", "/path/file.ctl", "ScriptId: N", "ScopeId: N", "ThreadId: N (stopped) main"]
+ * Detection: result[0].startsWith("line: ")
  */
 
 export class CommandEncoder {
     /**
-     * Encode set breakpoint command
+     * Encode set breakpoint command.
+     * @param scriptId  Script ID from "info scripts" response
+     * @param line      1-based line number
+     * @param scopeId   Scope ID (0 for main script)
+     * @param lib       Library ID (-1 for no library)
      */
     public static encodeSetBreakpoint(
-        location: string,
-        condition?: string,
-        temporary = false,
+        scriptId: number,
+        line: number,
+        scopeId = 0,
+        lib = -1,
     ): string {
-        // TODO: Implement breakpoint encoding
-        // Format: break <location> [if <condition>] [temporary]
-        let cmd = `break ${location}`;
-        if (condition) {
-            cmd += ` if ${condition}`;
-        }
-        if (temporary) {
-            cmd += ` temporary`;
-        }
-        return cmd;
+        return `breakpoint ${JSON.stringify({ scriptId, scopeId, lib, line })}`;
     }
 
     /**
@@ -50,10 +48,10 @@ export class CommandEncoder {
     }
 
     /**
-     * Encode continue command
+     * Encode continue command.
      */
     public static encodeContinue(): string {
-        return 'c';
+        return 'cont';
     }
 
     /**
@@ -85,17 +83,20 @@ export class CommandEncoder {
     }
 
     /**
-     * Encode get stack trace command
+     * Encode get stack trace command (backtrace).
+     * Requires script + thread to be selected first.
      */
     public static encodeGetStackTrace(): string {
-        return 'info stack';
+        return 'bt';
     }
 
     /**
-     * Encode get local variables command
+     * Encode get local variables command.
+     * Returns locals of the currently selected thread.
+     * Requires script + thread to be selected first.
      */
     public static encodeGetLocals(): string {
-        return 'info locals';
+        return 'info thread';
     }
 
     /**
@@ -113,10 +114,37 @@ export class CommandEncoder {
     }
 
     /**
-     * Encode pause command
+     * Encode pause/interrupt command.
+     * Sends "b" (break) to interrupt a running script.
      */
     public static encodePause(): string {
-        return 'break';
+        return 'b';
+    }
+
+    /**
+     * Encode select script context command.
+     * Must be sent before thread() after a stop event.
+     * @param scriptId  Script ID from stop event ("ScriptId: N")
+     */
+    public static encodeSelectScript(scriptId: number): string {
+        return `script ${scriptId}`;
+    }
+
+    /**
+     * Encode attach-to-thread command.
+     * Must be sent after selectScript() before bt/info thread/print/cont.
+     * @param threadId  Thread ID from stop event ("ThreadId: N ...")
+     */
+    public static encodeSelectThread(threadId: number): string {
+        return `thread ${threadId}`;
+    }
+
+    /**
+     * Encode get info scripts command.
+     * Returns list of loaded scripts with ScriptId.
+     */
+    public static encodeGetScripts(): string {
+        return 'info scripts';
     }
 
     /**
