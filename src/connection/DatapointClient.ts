@@ -148,11 +148,22 @@ export class DatapointClient extends EventEmitter {
     private pendingCommands = new Map<
         string,
         {
+            cmd: string;
             resolve: (value: string[]) => void;
             reject: (err: Error) => void;
             timeout: NodeJS.Timeout;
         }
     >();
+
+    /**
+     * Execution commands that may legitimately return a stop notification
+     * ("line: N" format) as their response.  Context-selection commands
+     * like "script N" or "thread N" can also return stop-format data, but
+     * we must NOT re-emit those as 'message' events — doing so sends a
+     * spurious StoppedEvent to VS Code for every stackTrace/variables
+     * request, which is the root cause of the "3 Continue presses" bug.
+     */
+    private static readonly EXEC_CMD_RE = /^(cont|next|step|finish|b)\b/;
 
     /**
      * @param config - Connection configuration
@@ -329,7 +340,7 @@ export class DatapointClient extends EventEmitter {
                 reject(new Error(`Command timeout after ${timeout}ms: ${cmd}`));
             }, timeout);
 
-            this.pendingCommands.set(id, { resolve, reject, timeout: timeoutHandle });
+            this.pendingCommands.set(id, { cmd, resolve, reject, timeout: timeoutHandle });
         });
 
         try {
@@ -379,12 +390,14 @@ export class DatapointClient extends EventEmitter {
                 this.pendingCommands.delete(id);
                 // WinCC OA 3.21 prepends the last command's ID to stop events even
                 // though they are unsolicited (e.g. breakpoint hit during "b" pause).
-                // Detect this case and emit 'message' so the session can fire
-                // StoppedEvent — while still resolving the pending command promise
-                // (caller receives the stop data, which it can safely ignore).
-                // Emit 'result' (without the UUID prefix) so handleUnsolicitedMessage
-                // receives msg[0] = "line: N" — matching the truly-unsolicited format.
-                if (result[0]?.startsWith('line: ')) {
+                // Only re-emit as 'message' for execution commands (cont, next, step,
+                // finish, b). Context-selection commands like "script N" / "thread N"
+                // can ALSO return stop-format data but must NOT trigger StoppedEvent —
+                // that would cause spurious extra stops on every stackTrace request.
+                if (
+                    DatapointClient.EXEC_CMD_RE.test(pending.cmd) &&
+                    result[0]?.startsWith('line: ')
+                ) {
                     this.emit('message', result);
                 }
                 pending.resolve(result);

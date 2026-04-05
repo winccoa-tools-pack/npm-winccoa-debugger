@@ -24,6 +24,7 @@
 import path from 'path';
 import {
     DebugSession,
+    BreakpointEvent,
     ContinuedEvent,
     InitializedEvent,
     TerminatedEvent,
@@ -138,6 +139,21 @@ export class WinCCDebugSession extends DebugSession {
      */
     private stopOnEntryPending = false;
 
+    /**
+     * Breakpoints that could not be set during the initial setBreakpoints call
+     * because the source file was not yet listed in 'info scripts'.
+     *
+     * This happens for library files loaded via `#uses`: they are compiled and
+     * linked at startup but only appear in `info scripts` once a function from
+     * them has an active call frame.  We retry setting them on every stop event
+     * and notify VS Code via BreakpointEvent when verification succeeds.
+     *
+     * Key:   absolute source path
+     * Value: array of {bp, line} where bp is the Breakpoint object already sent
+     *        to VS Code (so we can update bp.verified and notify via event).
+     */
+    private pendingBpRequests = new Map<string, Array<{ bp: Breakpoint; line: number }>>();
+
     constructor() {
         super();
     }
@@ -245,6 +261,9 @@ export class WinCCDebugSession extends DebugSession {
                 if (!this.stopOnEntryPending) {
                     this.sendEvent(new StoppedEvent('breakpoint', threadId));
                 }
+                // Retry any pending breakpoints (e.g. library files loaded via #uses
+                // that weren't visible in 'info scripts' during initial setup).
+                this.retryPendingBreakpoints();
             }
             return;
         }
@@ -595,7 +614,9 @@ export class WinCCDebugSession extends DebugSession {
         if (this.stopOnEntryPending) {
             this.stopOnEntryPending = false;
             const threadId = this.stopState?.threadId ?? this.CTRL_THREAD_ID;
-            this.log(`stopOnEntry: sending StoppedEvent (thread=${threadId}, stopState=${this.stopState != null})`);
+            this.log(
+                `stopOnEntry: sending StoppedEvent (thread=${threadId}, stopState=${this.stopState != null})`,
+            );
             this.sendEvent(new StoppedEvent('entry', threadId));
         } else {
             this.sendEvent(new ContinuedEvent(this.CTRL_THREAD_ID));
@@ -654,14 +675,23 @@ export class WinCCDebugSession extends DebugSession {
 
             if (scriptId === -1) {
                 this.log(
-                    `Script "${scriptBasename}" not found via info scripts — returning unverified`,
+                    `Script "${scriptBasename}" not found via info scripts — storing as pending`,
                 );
-                response.body = {
-                    breakpoints: requestedBps.map((bp) => new Breakpoint(false, bp.line)),
-                };
+                // Store pending so we can retry on the next stop event
+                // (library files loaded via #uses are only visible in 'info scripts'
+                // once a function from them has an active call frame).
+                const bps = requestedBps.map((bp) => {
+                    const b = new Breakpoint(false, bp.line);
+                    return { bp: b, line: bp.line };
+                });
+                this.pendingBpRequests.set(sourcePath, bps);
+                response.body = { breakpoints: bps.map((b) => b.bp) };
                 this.sendResponse(response);
                 return;
             }
+
+            // Script found — remove any pending entry for this file
+            this.pendingBpRequests.delete(sourcePath);
 
             const breakpoints: Breakpoint[] = [];
             for (const bp of requestedBps) {
@@ -691,6 +721,52 @@ export class WinCCDebugSession extends DebugSession {
     }
 
     /**
+     * Retry setting breakpoints for sources that previously returned unverified
+     * because the file was not yet in 'info scripts'.
+     *
+     * Called after every stop event.  When a library file is first entered, its
+     * script ID becomes available and the pending breakpoints can be set.
+     * VS Code is notified via BreakpointEvent('changed') so it un-greys them.
+     */
+    private retryPendingBreakpoints(): void {
+        if (!this.client?.isConnected() || this.pendingBpRequests.size === 0) return;
+
+        const client = this.client;
+        const snapshot = new Map(this.pendingBpRequests);
+
+        client
+            .sendCommand('info scripts', 3000)
+            .then((result) => {
+                for (const [sourcePath, bpList] of snapshot) {
+                    const scriptBasename = path.basename(sourcePath);
+                    const scriptId = this.findScriptId(result, scriptBasename);
+                    if (scriptId === -1) continue;
+
+                    // Found — remove from pending and set each breakpoint
+                    this.pendingBpRequests.delete(sourcePath);
+                    this.log(
+                        `Pending BPs for "${scriptBasename}" now settable (scriptId=${scriptId})`,
+                    );
+
+                    for (const { bp, line } of bpList) {
+                        const cmd = `breakpoint ${JSON.stringify({ scriptId, scopeId: 0, lib: -1, line })}`;
+                        client
+                            .sendCommand(cmd)
+                            .then((res) => {
+                                if (res[0] === 'breakpoint set') {
+                                    bp.verified = true;
+                                    this.sendEvent(new BreakpointEvent('changed', bp));
+                                    this.log(`Pending BP verified: ${scriptBasename}:${line}`);
+                                }
+                            })
+                            .catch(() => {});
+                    }
+                }
+            })
+            .catch(() => {});
+    }
+
+    /**
      * Search 'info scripts' response for a script matching the given basename.
      * Each entry in the result looks like:
      *   "ScriptId: N; current thread: T; scripts/fileName.ctl"  (relative)
@@ -712,77 +788,81 @@ export class WinCCDebugSession extends DebugSession {
     /**
      * Continue execution.
      * WinCC OA command: "cont"
+     *
+     * IMPORTANT: Send ContinueResponse BEFORE the WinCC OA command.
+     * WinCC OA uses the last command's ID to deliver the next stop event
+     * (it does not send a separate unsolicited event). If we wait for `cont`
+     * to resolve before sending ContinueResponse, the StoppedEvent from
+     * handleResponse arrives while VS Code is still in PAUSED state — which
+     * causes VS Code to ignore or mis-sequence the event, requiring 3 extra
+     * Continue presses per breakpoint.
+     * Sending the response first ensures VS Code transitions to RUNNING before
+     * the next StoppedEvent arrives.
      */
     protected continueRequest(
         response: DebugProtocol.ContinueResponse,
         _args: DebugProtocol.ContinueArguments,
     ): void {
-        const work = async () => {
-            if (this.client?.isConnected()) {
-                await this.client.sendCommand('cont').catch(() => {});
-            }
-            response.body = { allThreadsContinued: true };
-            this.sendResponse(response);
-        };
-        work().catch(() => {
-            response.body = { allThreadsContinued: true };
-            this.sendResponse(response);
-        });
+        response.body = { allThreadsContinued: true };
+        this.sendResponse(response);
+        if (this.client?.isConnected()) {
+            this.client.sendCommand('cont').catch(() => {});
+        }
     }
 
     /**
      * Step over (next line, do not enter function calls).
      * WinCC OA command: "next"  (GDB-style naming)
-     * The resulting stop is delivered as an unsolicited stop event.
+     *
+     * Send response first (same reasoning as continueRequest) so VS Code
+     * transitions to RUNNING before the resulting StoppedEvent arrives.
      */
     protected nextRequest(
         response: DebugProtocol.NextResponse,
         _args: DebugProtocol.NextArguments,
     ): void {
-        const work = async () => {
-            if (this.client?.isConnected()) {
-                await this.attachToStopContext(this.client).catch(() => {});
-                await this.client.sendCommand('next').catch(() => {});
-            }
-            this.sendResponse(response);
-        };
-        work().catch(() => this.sendResponse(response));
+        this.sendResponse(response);
+        if (this.client?.isConnected()) {
+            this.attachToStopContext(this.client)
+                .catch(() => {})
+                .then(() => this.client?.sendCommand('next').catch(() => {}));
+        }
     }
 
     /**
      * Step into function call.
      * WinCC OA command: "step"  (GDB-style naming)
+     *
+     * Send response first so VS Code is in RUNNING state when StoppedEvent arrives.
      */
     protected stepInRequest(
         response: DebugProtocol.StepInResponse,
         _args: DebugProtocol.StepInArguments,
     ): void {
-        const work = async () => {
-            if (this.client?.isConnected()) {
-                await this.attachToStopContext(this.client).catch(() => {});
-                await this.client.sendCommand('step').catch(() => {});
-            }
-            this.sendResponse(response);
-        };
-        work().catch(() => this.sendResponse(response));
+        this.sendResponse(response);
+        if (this.client?.isConnected()) {
+            this.attachToStopContext(this.client)
+                .catch(() => {})
+                .then(() => this.client?.sendCommand('step').catch(() => {}));
+        }
     }
 
     /**
      * Step out of current function.
      * WinCC OA command: "finish"  (GDB-style naming)
+     *
+     * Send response first so VS Code is in RUNNING state when StoppedEvent arrives.
      */
     protected stepOutRequest(
         response: DebugProtocol.StepOutResponse,
         _args: DebugProtocol.StepOutArguments,
     ): void {
-        const work = async () => {
-            if (this.client?.isConnected()) {
-                await this.attachToStopContext(this.client).catch(() => {});
-                await this.client.sendCommand('finish').catch(() => {});
-            }
-            this.sendResponse(response);
-        };
-        work().catch(() => this.sendResponse(response));
+        this.sendResponse(response);
+        if (this.client?.isConnected()) {
+            this.attachToStopContext(this.client)
+                .catch(() => {})
+                .then(() => this.client?.sendCommand('finish').catch(() => {}));
+        }
     }
 
     /**

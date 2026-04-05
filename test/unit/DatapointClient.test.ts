@@ -364,3 +364,45 @@ test('DatapointClient: answerOnConnect emits message from current DPE value on c
         `Expected ScriptId: 3 in first message, got: ${JSON.stringify(messages[0])}`,
     );
 });
+
+test('DatapointClient: context commands (script N, thread N) do NOT emit "message" on stop-format response', async () => {
+    // "script N" and "thread N" are context-selection commands. WinCC OA 3.21 responds
+    // to them with the current stop state — same "line: N" format as real stop events.
+    // We must NOT re-emit these as 'message' events, otherwise every stackTraceRequest
+    // or variablesRequest (which call attachToStopContext) would fire a spurious
+    // StoppedEvent — the root cause of the "3 Continue presses" bug.
+    const { client, api } = makeConnectedClient();
+    await client.connect();
+
+    let emittedMsg: string[] | null = null;
+    client.on('message', (msg: string[]) => {
+        emittedMsg = msg;
+    });
+
+    for (const contextCmd of ['script 1', 'thread 1', 'script 0', 'thread 0']) {
+        emittedMsg = null;
+
+        setTimeout(() => {
+            const raw = api.writtenValues.get('System1:_CtrlDebug_CTRL_1.Command');
+            assert.ok(raw);
+            const cmd = JSON.parse(raw) as { id: string; cmd: string };
+
+            // Simulate WinCC OA returning stop-format data for a context command
+            api.simulateValue('System1:_CtrlDebug_CTRL_1.Result', [
+                cmd.id,
+                'line: 50',
+                '/scripts/test.ctl',
+                'ScriptId: 1',
+                'ScopeId: 0',
+                'ThreadId: 1 (stopped) main',
+            ]);
+        }, 10);
+
+        await client.sendCommand(contextCmd);
+        assert.equal(
+            emittedMsg,
+            null,
+            `"${contextCmd}" must NOT emit 'message' even if WinCC OA returns stop-format data`,
+        );
+    }
+});
