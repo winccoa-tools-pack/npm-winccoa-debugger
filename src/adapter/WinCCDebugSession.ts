@@ -93,6 +93,14 @@ export interface AttachRequestArguments extends DebugProtocol.AttachRequestArgum
      * Defaults to 99.
      */
     adapterManagerNumber?: number;
+    /**
+     * When true, the adapter expects the script to be paused at `DebugBreak()`
+     * on attach. The adapter will NOT resume after connecting and instead waits
+     * for the stop event delivered via `answerOnConnect`.
+     *
+     * Requires: manager started with `-dbg 6` (CTRL_DEBUGBREAK flag).
+     */
+    stopOnEntry?: boolean;
     /** Path mappings: local VS Code path → WinCC OA path */
     pathMappings?: Record<string, string>;
     /** Enable verbose logging to the debug console */
@@ -123,6 +131,12 @@ export class WinCCDebugSession extends DebugSession {
      * Required to select the correct script/thread before bt/locals/print.
      */
     private stopState: { scriptId: number; threadId: number; scopeId: number } | null = null;
+
+    /**
+     * Set to true when `stopOnEntry` is active. configurationDoneRequest
+     * will send a StoppedEvent instead of ContinuedEvent in this case.
+     */
+    private stopOnEntryPending = false;
 
     constructor() {
         super();
@@ -483,6 +497,7 @@ export class WinCCDebugSession extends DebugSession {
         const port = args.port ?? 4999;
         const managerType = args.manager?.type ?? 'CTRL';
         const managerNumber = args.manager?.number ?? 1;
+        const stopOnEntry = (args as AttachRequestArguments).stopOnEntry ?? false;
 
         const config: DatapointConfig = {
             system,
@@ -490,6 +505,10 @@ export class WinCCDebugSession extends DebugSession {
             port,
             managerType,
             managerNumber,
+            // answerOnConnect=true: WinCC OA fires the dpConnect callback immediately
+            // with the current DP value. Required for stopOnEntry / DebugBreak(): the
+            // script may have already stopped before the adapter connected.
+            answerOnConnect: stopOnEntry,
             // DO NOT inject connectionArgs here.
             // The adapter is always started via bootstrap.js which establishes the
             // WinCC OA connection (ConnectionBinding.start()) before our code runs.
@@ -497,8 +516,13 @@ export class WinCCDebugSession extends DebugSession {
             // second WinccoaManager to try to re-register — connection already live.
         };
 
+        if (stopOnEntry) {
+            this.stopOnEntryPending = true;
+        }
+
         this.log(
-            `Connecting to ${host}:${port} project=${project} system=${system} manager=${managerType}:${managerNumber}`,
+            `Connecting to ${host}:${port} project=${project} system=${system} manager=${managerType}:${managerNumber}` +
+                (stopOnEntry ? ' [stopOnEntry]' : ''),
         );
 
         const client = this.createDatapointClient(config);
@@ -517,9 +541,15 @@ export class WinCCDebugSession extends DebugSession {
             .connect()
             .then(() => {
                 this.log(`Connected. Debug DP: ${client.getDebugDp()}`);
-                // Resume if CTRL is paused from a previous session.
-                // Short timeout: if already running cont has no response at all.
-                // If paused, CTRL responds within a few ms ("continuing").
+                if (stopOnEntry) {
+                    // Script is paused at DebugBreak(). Do NOT resume here.
+                    // answerOnConnect=true ensures the stop event is delivered by
+                    // dpConnect immediately. configurationDoneRequest will fire
+                    // StoppedEvent after VS Code finishes sending breakpoints.
+                    return Promise.resolve();
+                }
+                // Normal attach: resume if CTRL is paused from a previous session.
+                // Short timeout: if already running, cont has no response.
                 return client.sendCommand('cont', 500).catch(() => {});
             })
             .then(() => {
@@ -535,6 +565,7 @@ export class WinCCDebugSession extends DebugSession {
             })
             .catch((err: Error) => {
                 this.log(`Connect failed: ${err.message}`);
+                this.stopOnEntryPending = false;
                 this.client = null;
                 response.success = false;
                 response.message = err.message;
@@ -544,14 +575,24 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Configuration done — VS Code has finished sending the initial breakpoint list.
-     * Emit ContinuedEvent so VS Code shows the "running" state.
+     *
+     * Normal attach: emit ContinuedEvent so VS Code shows the "running" state.
+     * stopOnEntry: emit StoppedEvent so VS Code pauses at DebugBreak(). The
+     * stop event was already delivered via answerOnConnect during connect().
      */
     protected configurationDoneRequest(
         response: DebugProtocol.ConfigurationDoneResponse,
         _args: DebugProtocol.ConfigurationDoneArguments,
     ): void {
         this.sendResponse(response);
-        this.sendEvent(new ContinuedEvent(this.CTRL_THREAD_ID));
+        if (this.stopOnEntryPending) {
+            this.stopOnEntryPending = false;
+            const threadId = this.stopState?.threadId ?? this.CTRL_THREAD_ID;
+            this.log(`stopOnEntry: sending StoppedEvent (thread=${threadId}, stopState=${this.stopState != null})`);
+            this.sendEvent(new StoppedEvent('entry', threadId));
+        } else {
+            this.sendEvent(new ContinuedEvent(this.CTRL_THREAD_ID));
+        }
     }
 
     /**
