@@ -725,7 +725,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step over (next line, do not enter function calls).
-     * WinCC OA command: "step over"
+     * WinCC OA command: "next"  (GDB-style naming)
      * The resulting stop is delivered as an unsolicited stop event.
      */
     protected nextRequest(
@@ -735,7 +735,7 @@ export class WinCCDebugSession extends DebugSession {
         const work = async () => {
             if (this.client?.isConnected()) {
                 await this.attachToStopContext(this.client).catch(() => {});
-                await this.client.sendCommand('step over').catch(() => {});
+                await this.client.sendCommand('next').catch(() => {});
             }
             this.sendResponse(response);
         };
@@ -744,7 +744,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step into function call.
-     * WinCC OA command: "step in"
+     * WinCC OA command: "step"  (GDB-style naming)
      */
     protected stepInRequest(
         response: DebugProtocol.StepInResponse,
@@ -753,7 +753,7 @@ export class WinCCDebugSession extends DebugSession {
         const work = async () => {
             if (this.client?.isConnected()) {
                 await this.attachToStopContext(this.client).catch(() => {});
-                await this.client.sendCommand('step in').catch(() => {});
+                await this.client.sendCommand('step').catch(() => {});
             }
             this.sendResponse(response);
         };
@@ -762,7 +762,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step out of current function.
-     * WinCC OA command: "step out"
+     * WinCC OA command: "finish"  (GDB-style naming)
      */
     protected stepOutRequest(
         response: DebugProtocol.StepOutResponse,
@@ -771,7 +771,7 @@ export class WinCCDebugSession extends DebugSession {
         const work = async () => {
             if (this.client?.isConnected()) {
                 await this.attachToStopContext(this.client).catch(() => {});
-                await this.client.sendCommand('step out').catch(() => {});
+                await this.client.sendCommand('finish').catch(() => {});
             }
             this.sendResponse(response);
         };
