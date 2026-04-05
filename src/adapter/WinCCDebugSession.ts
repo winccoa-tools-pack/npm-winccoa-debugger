@@ -237,7 +237,14 @@ export class WinCCDebugSession extends DebugSession {
                 this.log(
                     `Stop at line ${lineNum}, thread ${threadId}, script ${scriptId}, scope ${scopeId}`,
                 );
-                this.sendEvent(new StoppedEvent('breakpoint', threadId));
+                // When stopOnEntry is pending, configurationDoneRequest will emit
+                // StoppedEvent('entry') after VS Code has processed the initial
+                // breakpoint list. Suppress the StoppedEvent here to avoid sending
+                // it before the attachRequest response (out-of-order DAP events
+                // confuse VS Code, causing extra Continue presses).
+                if (!this.stopOnEntryPending) {
+                    this.sendEvent(new StoppedEvent('breakpoint', threadId));
+                }
             }
             return;
         }
