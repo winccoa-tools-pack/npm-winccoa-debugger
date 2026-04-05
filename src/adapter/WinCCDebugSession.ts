@@ -220,7 +220,9 @@ export class WinCCDebugSession extends DebugSession {
                 const scopeMatch = /ScopeId:\s*(\d+)/.exec(scopeEntry);
                 const scopeId = scopeMatch ? parseInt(scopeMatch[1], 10) : 0;
                 this.stopState = { scriptId, threadId, scopeId };
-                this.log(`Stop at line ${lineNum}, thread ${threadId}, script ${scriptId}, scope ${scopeId}`);
+                this.log(
+                    `Stop at line ${lineNum}, thread ${threadId}, script ${scriptId}, scope ${scopeId}`,
+                );
                 this.sendEvent(new StoppedEvent('breakpoint', threadId));
             }
             return;
@@ -281,7 +283,9 @@ export class WinCCDebugSession extends DebugSession {
                 const filePath = this.toVSCodePath(gdbMatch[3].trim());
                 const lineNum = parseInt(gdbMatch[4], 10);
                 const fileName = filePath.split('/').pop() ?? filePath;
-                frames.push(new StackFrame(frameId, funcName, new Source(fileName, filePath), lineNum, 0));
+                frames.push(
+                    new StackFrame(frameId, funcName, new Source(fileName, filePath), lineNum, 0),
+                );
                 continue;
             }
             // WinCC OA real format: "funcSignature at /abs/path.ctl:N"
@@ -292,7 +296,15 @@ export class WinCCDebugSession extends DebugSession {
                 const filePath = this.toVSCodePath(wcMatch[2].trim());
                 const lineNum = parseInt(wcMatch[3], 10);
                 const fileName = filePath.split('/').pop() ?? filePath;
-                frames.push(new StackFrame(frames.length, funcName, new Source(fileName, filePath), lineNum, 0));
+                frames.push(
+                    new StackFrame(
+                        frames.length,
+                        funcName,
+                        new Source(fileName, filePath),
+                        lineNum,
+                        0,
+                    ),
+                );
             }
         }
         return frames;
@@ -593,7 +605,9 @@ export class WinCCDebugSession extends DebugSession {
             }
 
             if (scriptId === -1) {
-                this.log(`Script "${scriptBasename}" not found via info scripts — returning unverified`);
+                this.log(
+                    `Script "${scriptBasename}" not found via info scripts — returning unverified`,
+                );
                 response.body = {
                     breakpoints: requestedBps.map((bp) => new Breakpoint(false, bp.line)),
                 };

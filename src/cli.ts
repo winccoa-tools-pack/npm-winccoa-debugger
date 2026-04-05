@@ -18,16 +18,16 @@ interface CLIArgs {
     host?: string;
     port?: number;
     project?: string; // WinCC OA project name for -proj arg (e.g. DevEnv3.21)
-    system?: string;  // WinCC OA system name for DP prefix (e.g. System1)
+    system?: string; // WinCC OA system name for DP prefix (e.g. System1)
     manager?: string; // Format: "ctrl:5" — the CTRL manager to debug (not the adapter's own number)
     adapterNum?: number; // Adapter's own manager number (default 99)
-    user?: string;    // WinCC OA username
-    pass?: string;    // WinCC OA password
+    user?: string; // WinCC OA username
+    pass?: string; // WinCC OA password
     stdio?: boolean;
     tcpPort?: number; // DAP over TCP (used when started via bootstrap.js)
     testConnect?: boolean;
-    testEcho?: boolean;  // Test round-trip against simple TestEcho_1 DP (no debug DP needed)
-    repl?: boolean;   // Interactive REPL mode for manual protocol testing
+    testEcho?: boolean; // Test round-trip against simple TestEcho_1 DP (no debug DP needed)
+    repl?: boolean; // Interactive REPL mode for manual protocol testing
 }
 
 function parseArgs(args: string[]): CLIArgs {
@@ -130,8 +130,8 @@ Examples (via bootstrap.js — WinCC OA connection already established):
  * progs entry:  WCCOActrl | manual | 30 | 3 | 1 | -num 6 test_echo_server.ctl
  */
 async function runTestEcho(config: DatapointConfig): Promise<void> {
-    const system  = config.system ? config.system + ':' : '';
-    const inputDpe  = `${system}TestEcho_1.Input`;
+    const system = config.system ? config.system + ':' : '';
+    const inputDpe = `${system}TestEcho_1.Input`;
     const outputDpe = `${system}TestEcho_1.Output`;
 
     process.stderr.write('WinCC OA Debug Adapter - Echo Round-Trip Test\n');
@@ -150,12 +150,16 @@ async function runTestEcho(config: DatapointConfig): Promise<void> {
 
     // Since DatapointClient only exposes sendCommand on the debug DP, we build a
     // minimal standalone test using the winccoa-manager directly:
-    await client.connect();  // establishes the WinccoaManager connection
+    await client.connect(); // establishes the WinccoaManager connection
 
     // Access the internal api via a cast — for test purposes only
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     const api = (client as any).api as {
-        dpConnect(cb: (names: string[], values: any[]) => void, dpe: string, answer?: boolean): number;
+        dpConnect(
+            cb: (names: string[], values: any[]) => void,
+            dpe: string,
+            answer?: boolean,
+        ): number;
         dpSetWait(dpe: string, value: any): Promise<void>;
         dpDisconnect(id: number): void;
     };
@@ -167,26 +171,34 @@ async function runTestEcho(config: DatapointConfig): Promise<void> {
     let rejectEcho: (e: Error) => void;
     const echoPromise = new Promise<string>((res, rej) => {
         resolveEcho = res;
-        rejectEcho  = rej;
+        rejectEcho = rej;
     });
 
-    const subId = api.dpConnect((names, values) => {
-        process.stderr.write(`[echo] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`);
-        const val = values[0];
-        if (val && val !== '' && val !== '{}') {
-            resolveEcho!(String(val));
-        }
-    }, outputDpe, false);
+    const subId = api.dpConnect(
+        (names, values) => {
+            process.stderr.write(
+                `[echo] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`,
+            );
+            const val = values[0];
+            if (val && val !== '' && val !== '{}') {
+                resolveEcho!(String(val));
+            }
+        },
+        outputDpe,
+        false,
+    );
 
     if (subId < 0) {
         process.stderr.write(`✗ dpConnect failed for "${outputDpe}" (id=${subId})\n`);
-        process.stderr.write('  → Is test_echo_server.ctl running? (progs: -num 6 test_echo_server.ctl)\n');
+        process.stderr.write(
+            '  → Is test_echo_server.ctl running? (progs: -num 6 test_echo_server.ctl)\n',
+        );
         process.exit(1);
     }
     process.stderr.write(`✓ Subscribed to ${outputDpe} (subId=${subId})\n`);
 
     // Send payload to Input
-    const id      = `${Date.now()}-echo-test`;
+    const id = `${Date.now()}-echo-test`;
     const payload = JSON.stringify({ id, echo: 'hello from Node.js' });
 
     process.stderr.write(`\nSending to ${inputDpe}: ${payload}\n`);
@@ -207,7 +219,9 @@ async function runTestEcho(config: DatapointConfig): Promise<void> {
 
         const parsed = JSON.parse(response) as { id: string; echoed: string };
         if (parsed.id === id && parsed.echoed === 'hello from Node.js') {
-            process.stderr.write('✓ Round-trip complete — dpSetWait + dpConnect works correctly!\n');
+            process.stderr.write(
+                '✓ Round-trip complete — dpSetWait + dpConnect works correctly!\n',
+            );
         } else {
             process.stderr.write(`✗ Unexpected response content: ${response}\n`);
         }
@@ -286,8 +300,12 @@ async function runRepl(config: DatapointConfig): Promise<void> {
 
     client.on('connected', () => {
         process.stderr.write('✓ Connected. Debug DP: ' + client.getDebugDp() + '\n\n');
-        process.stderr.write('Commands: info scripts | info breakpoints | info threads | info locals\n');
-        process.stderr.write('          breakpoint {"scriptId":N,"line":M} | continue | next | step\n');
+        process.stderr.write(
+            'Commands: info scripts | info breakpoints | info threads | info locals\n',
+        );
+        process.stderr.write(
+            '          breakpoint {"scriptId":N,"line":M} | continue | next | step\n',
+        );
         process.stderr.write('          bt | finish | interrupt | print <expr> | quit\n\n');
     });
 
@@ -336,10 +354,14 @@ async function runRepl(config: DatapointConfig): Promise<void> {
         }
         if (cmd === 'help') {
             process.stderr.write('Available commands:\n');
-            process.stderr.write('  info scripts              — list loaded CTL scripts with their IDs\n');
+            process.stderr.write(
+                '  info scripts              — list loaded CTL scripts with their IDs\n',
+            );
             process.stderr.write('  info breakpoints          — list active breakpoints\n');
             process.stderr.write('  info threads              — list CTRL threads\n');
-            process.stderr.write('  info locals               — show local variables at current stop\n');
+            process.stderr.write(
+                '  info locals               — show local variables at current stop\n',
+            );
             process.stderr.write('  breakpoint {"scriptId":N,"line":M}  — set breakpoint\n');
             process.stderr.write('  continue                  — resume execution\n');
             process.stderr.write('  next                      — step over\n');
@@ -404,11 +426,13 @@ function runTcpMode(tcpPort: number): void {
 }
 
 async function main() {
-    process.stderr.write('[winccoa-debugger] Starting, process.argv: ' + process.argv.join(' ') + '\n');
+    process.stderr.write(
+        '[winccoa-debugger] Starting, process.argv: ' + process.argv.join(' ') + '\n',
+    );
 
     // bootstrap.js shifts process.argv so argv[0] = our script, argv[1] = first flag.
     // Normal invocation: argv[0]=node, argv[1]=script, argv[2+]=flags.
-    const flagStart = process.argv.findIndex(a => a.startsWith('--') || a === '-h');
+    const flagStart = process.argv.findIndex((a) => a.startsWith('--') || a === '-h');
     const args = parseArgs(flagStart >= 0 ? process.argv.slice(flagStart) : []);
 
     process.stderr.write('[winccoa-debugger] Parsed args: ' + JSON.stringify(args) + '\n');
@@ -448,14 +472,19 @@ async function main() {
         managerNumber,
         ...(needsConnectionArgs
             ? {
-                connectionArgs: [
-                    '-proj', args.project!,
-                    '-host', args.host || 'localhost',
-                    '-port', String(args.port || 4999),
-                    '-num', String(adapterNum),
-                    '-m',   'jscript',
-                    ...(args.user ? ['-user', args.user, '-pass', args.pass ?? ''] : []),
-                ],
+                  connectionArgs: [
+                      '-proj',
+                      args.project!,
+                      '-host',
+                      args.host || 'localhost',
+                      '-port',
+                      String(args.port || 4999),
+                      '-num',
+                      String(adapterNum),
+                      '-m',
+                      'jscript',
+                      ...(args.user ? ['-user', args.user, '-pass', args.pass ?? ''] : []),
+                  ],
               }
             : {}),
     };
@@ -483,4 +512,3 @@ main().catch((err) => {
     process.stderr.write('Fatal error: ' + String(err) + '\n');
     process.exit(1);
 });
-

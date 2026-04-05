@@ -13,7 +13,7 @@ class MockWinccoaManager implements IWinccoaManager {
     private nextSubId = 1;
 
     /** Official API: callback is FIRST param, returns subscription id */
-    dpConnect(callback: (values: any[], dpeNames: string[]) => void, dpeNames: string | string[], _answer?: boolean): number {
+    dpConnect(callback: (names: string[], values: any[], type?: any, error?: any) => void, dpeNames: string | string[], _answer?: boolean): number {
         const id = this.nextSubId++;
         this.subscriptions.set(id, { callback, dpeNames });
         return id;
@@ -40,7 +40,9 @@ class MockWinccoaManager implements IWinccoaManager {
         for (const { callback, dpeNames } of this.subscriptions.values()) {
             const subscribed = Array.isArray(dpeNames) ? dpeNames : [dpeNames];
             if ((subscribed as string[]).includes(dpName)) {
-                callback([value], [dpName]);
+                // Real WinccoaManager callback: (names: string[], values: any[])
+                // names[0] = DPE name, values[0] = actual DPE value
+                callback([dpName], [value]);
             }
         }
     }
@@ -230,4 +232,59 @@ test('DatapointClient: omits system prefix in DPE names when system is not set',
 
     const result = await client.sendCommand('test');
     assert.deepEqual(result, ['OK']);
+});
+
+test('DatapointClient: ID-quirk — stop event with command ID emits message AND resolves command', async () => {
+    // WinCC OA 3.21 attaches the last command's ID to stop events (e.g. during "b" pause).
+    // When WinCC OA responds to command "b" with a stop event:
+    //   ["<cmd-id>", "line: 26", "/path/file.ctl", "ScriptId: 0", "ScopeId: 0", "ThreadId: 0 (stopped) main"]
+    // DatapointClient must:
+    //   1. Resolve the pending "b" command (so caller doesn't hang)
+    //   2. Emit 'message' with result (WITHOUT the UUID prefix) so the session
+    //      can detect msg[0] = "line: N" and fire a StoppedEvent.
+    const { client, api } = makeConnectedClient();
+    await client.connect();
+
+    let emittedMsg: string[] | null = null;
+    client.on('message', (msg: string[]) => {
+        emittedMsg = msg;
+    });
+
+    // Simulate: sendCommand('b') is pending, then WinCC OA responds with a stop event
+    // that happens to carry the command's ID as its first element.
+    setTimeout(() => {
+        const raw = api.writtenValues.get('System1:_CtrlDebug_CTRL_1.Command');
+        assert.ok(raw, 'Command DPE must be written');
+        const cmd = JSON.parse(raw) as { id: string; cmd: string };
+        assert.equal(cmd.cmd, 'b');
+
+        // WinCC OA 3.21 format: ID-prefixed stop event
+        api.simulateValue('System1:_CtrlDebug_CTRL_1.Result', [
+            cmd.id,
+            'line: 26',
+            '/path/loop_test.ctl',
+            'ScriptId: 0',
+            'ScopeId: 0',
+            'ThreadId: 0 (stopped) main',
+        ]);
+    }, 10);
+
+    // The command should resolve (not hang) even though it's a stop event response.
+    const result = await client.sendCommand('b');
+
+    // The resolved result is the stop data (without the UUID prefix).
+    assert.deepEqual(result, [
+        'line: 26',
+        '/path/loop_test.ctl',
+        'ScriptId: 0',
+        'ScopeId: 0',
+        'ThreadId: 0 (stopped) main',
+    ]);
+
+    // 'message' must have been emitted WITH the stop data (no UUID prefix)
+    // so that WinCCDebugSession.handleUnsolicitedMessage can process msg[0] = "line: N".
+    assert.ok(emittedMsg, "'message' event must be emitted for the stop event");
+    assert.equal(emittedMsg![0], 'line: 26', 'msg[0] must be "line: N" (no UUID prefix)');
+    assert.equal(emittedMsg![2], 'ScriptId: 0');
+    assert.equal(emittedMsg![4], 'ThreadId: 0 (stopped) main');
 });

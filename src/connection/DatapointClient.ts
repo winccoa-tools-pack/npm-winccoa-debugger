@@ -218,7 +218,9 @@ export class DatapointClient extends EventEmitter {
                     (this.api as any).setUserId(1);
                     process.stderr.write(`[DatapointClient] setUserId(1) OK\n`);
                 } catch (e) {
-                    process.stderr.write(`[DatapointClient] setUserId(1) failed: ${(e as Error).message} — continuing anyway\n`);
+                    process.stderr.write(
+                        `[DatapointClient] setUserId(1) failed: ${(e as Error).message} — continuing anyway\n`,
+                    );
                 }
             }
 
@@ -239,8 +241,8 @@ export class DatapointClient extends EventEmitter {
                     this.handleResponse(values[0]);
                 },
                 resultDpe,
-                false,  // answer=false: do NOT fire immediately with stale current value;
-                        // only fire when .Result actually changes (= new response arrives)
+                false, // answer=false: do NOT fire immediately with stale current value;
+                // only fire when .Result actually changes (= new response arrives)
             );
 
             // dpConnect returns -1 when the DPE does not exist or the subscription
@@ -249,7 +251,7 @@ export class DatapointClient extends EventEmitter {
             if (this.resultSubscriptionId < 0) {
                 throw new Error(
                     `dpConnect failed for "${resultDpe}" (returned ${this.resultSubscriptionId}). ` +
-                    `Ensure the CTRL manager is running and debug datapoints are initialised.`,
+                        `Ensure the CTRL manager is running and debug datapoints are initialised.`,
                 );
             }
 
@@ -342,7 +344,9 @@ export class DatapointClient extends EventEmitter {
             if (!Array.isArray(value) || value.length === 0) {
                 return;
             }
-            process.stderr.write(`[DatapointClient] handleResponse value: ${JSON.stringify(value)}\n`);
+            process.stderr.write(
+                `[DatapointClient] handleResponse value: ${JSON.stringify(value)}\n`,
+            );
 
             const [id, ...result] = value as string[];
 
@@ -356,8 +360,10 @@ export class DatapointClient extends EventEmitter {
                 // Detect this case and emit 'message' so the session can fire
                 // StoppedEvent — while still resolving the pending command promise
                 // (caller receives the stop data, which it can safely ignore).
+                // Emit 'result' (without the UUID prefix) so handleUnsolicitedMessage
+                // receives msg[0] = "line: N" — matching the truly-unsolicited format.
                 if (result[0]?.startsWith('line: ')) {
-                    this.emit('message', value as string[]);
+                    this.emit('message', result);
                 }
                 pending.resolve(result);
             } else {

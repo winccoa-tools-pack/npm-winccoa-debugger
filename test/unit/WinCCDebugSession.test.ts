@@ -161,6 +161,10 @@ test('WinCCDebugSession: attachRequest connects and sends InitializedEvent', asy
 
     assert.equal(session.sentResponses.length, 1, 'Should send exactly one response');
     assert.equal(session.sentResponses[0].success, true);
+    // cont + delete-all must be sent before InitializedEvent to resume any
+    // stale paused state and clear old breakpoints from the previous session.
+    assert.ok(mock.commands.includes('cont'), 'attach must send cont to resume stale paused state');
+    assert.ok(mock.commands.includes('delete-all'), 'attach must send delete-all to clear stale BPs');
     // InitializedEvent must be sent AFTER the successful response
     const initEvent = session.sentEvents.find((e) => e.event === 'initialized');
     assert.ok(initEvent, 'InitializedEvent must be emitted after successful connect');
@@ -241,10 +245,14 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
     const bp1 = JSON.parse(mock.commands[1].slice('breakpoint '.length));
     assert.equal(bp1.scriptId, 7, 'scriptId must be 7');
     assert.equal(bp1.line, 5, 'line must be 5');
+    assert.equal(bp1.scopeId, 0, 'scopeId must be 0 (required by WinCC OA 3.21)');
+    assert.equal(bp1.lib, -1, 'lib must be -1 (required by WinCC OA 3.21)');
 
     const bp2 = JSON.parse(mock.commands[2].slice('breakpoint '.length));
     assert.equal(bp2.scriptId, 7);
     assert.equal(bp2.line, 12);
+    assert.equal(bp2.scopeId, 0);
+    assert.equal(bp2.lib, -1);
 
     const bps = (session.sentResponses[0].body as DebugProtocol.SetBreakpointsResponse['body'])
         .breakpoints;
@@ -503,6 +511,9 @@ test('WinCCDebugSession: disconnectRequest calls client.disconnect()', async () 
     await new Promise((r) => setImmediate(r));
 
     assert.ok(disconnected, 'DatapointClient.disconnect() must be called');
+    // cleanupClient must resume CTRL and clear BPs before disconnecting
+    assert.ok(mock.commands.includes('delete-all'), 'cleanup must send delete-all before disconnect');
+    assert.ok(mock.commands.includes('cont'), 'cleanup must send cont to resume CTRL before disconnect');
     assert.equal(session.sentResponses.length, 1);
 });
 
@@ -607,4 +618,120 @@ test('WinCCDebugSession: launchRequest behaves like attachRequest', async () => 
 
     assert.equal(session.sentResponses[0].success, true);
     assert.ok(session.sentEvents.some((e) => e.event === 'initialized'));
+});
+
+test('WinCCDebugSession: WinCC OA 3.21 stop format emits StoppedEvent and sets stopState', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    const attachResp = makeResponse<DebugProtocol.AttachResponse>('attach');
+    session.attachRequest(attachResp, defaultAttachArgs);
+    await new Promise((r) => setImmediate(r));
+    session.sentEvents = [];
+
+    // Simulate WinCC OA 3.21 stop event: "line: N" format with ScriptId/ScopeId/ThreadId
+    mock.emit('message', [
+        'line: 26',
+        '/home/testus/proj/scripts/loop_test.ctl',
+        'ScriptId: 3',
+        'ScopeId: 0',
+        'ThreadId: 2 (stopped) main',
+    ]);
+    await new Promise((r) => setImmediate(r));
+
+    const stopEvent = session.sentEvents.find((e) => e.event === 'stopped');
+    assert.ok(stopEvent, 'StoppedEvent must be emitted for WinCC OA 3.21 line: format');
+    assert.equal((stopEvent as DebugProtocol.StoppedEvent).body.reason, 'breakpoint');
+    assert.equal((stopEvent as DebugProtocol.StoppedEvent).body.threadId, 2);
+
+    // stopState must capture scriptId and scopeId for subsequent bt/vars requests
+    const stopState = (session as any).stopState as {
+        scriptId: number;
+        threadId: number;
+        scopeId: number;
+    };
+    assert.ok(stopState, 'stopState must be set after stop event');
+    assert.equal(stopState.scriptId, 3);
+    assert.equal(stopState.threadId, 2);
+    assert.equal(stopState.scopeId, 0);
+});
+
+test('WinCCDebugSession: stackTraceRequest sends script+thread context before bt', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+    // Inject stopState as if a stop event was received for script 5, thread 1
+    (session as any).stopState = { scriptId: 5, threadId: 1, scopeId: 0 };
+
+    mock.sendCommand = async (cmd: string) => {
+        mock.commands.push(cmd);
+        if (cmd === 'bt') {
+            return ['void main() at /path/loop_test.ctl:10'];
+        }
+        return ['OK'];
+    };
+
+    const response = makeResponse<DebugProtocol.StackTraceResponse>('stackTrace');
+    session.stackTraceRequest(response, { threadId: 1 });
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(mock.commands.includes('script 5'), 'script N must be sent before bt');
+    assert.ok(mock.commands.includes('thread 1'), 'thread N must be sent before bt');
+    assert.ok(mock.commands.includes('bt'), 'bt must be sent to get call stack');
+    // script N must precede thread N, which must precede bt
+    const scriptIdx = mock.commands.indexOf('script 5');
+    const threadIdx = mock.commands.indexOf('thread 1');
+    const btIdx = mock.commands.indexOf('bt');
+    assert.ok(scriptIdx < threadIdx, 'script N must come before thread N');
+    assert.ok(threadIdx < btIdx, 'thread N must come before bt');
+
+    const frames = (session.sentResponses[0].body as DebugProtocol.StackTraceResponse['body'])
+        .stackFrames;
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].name, 'void main()');
+    assert.equal(frames[0].line, 10);
+});
+
+test('WinCCDebugSession: variablesRequest sends script+thread context before info thread', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+    (session as any).stopState = { scriptId: 2, threadId: 0, scopeId: 0 };
+
+    mock.sendCommand = async (cmd: string) => {
+        mock.commands.push(cmd);
+        if (cmd === 'info thread') {
+            return ['{"const":0,"name":"x","value":{"type":"int","finalType":"int","value":99}}'];
+        }
+        return ['OK'];
+    };
+
+    const scopesResp = makeResponse<DebugProtocol.ScopesResponse>('scopes');
+    session.scopesRequest(scopesResp, { frameId: 0 });
+    const varRef = (session.sentResponses[0].body as DebugProtocol.ScopesResponse['body'])
+        .scopes[0].variablesReference;
+    session.sentResponses = [];
+
+    const response = makeResponse<DebugProtocol.VariablesResponse>('variables');
+    session.variablesRequest(response, { variablesReference: varRef });
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(mock.commands.includes('script 2'), 'script N must be sent before info thread');
+    assert.ok(mock.commands.includes('thread 0'), 'thread N must be sent before info thread');
+    assert.ok(mock.commands.includes('info thread'), 'info thread must be sent for locals');
+    const scriptIdx = mock.commands.indexOf('script 2');
+    const threadIdx = mock.commands.indexOf('thread 0');
+    const infoIdx = mock.commands.indexOf('info thread');
+    assert.ok(scriptIdx < threadIdx);
+    assert.ok(threadIdx < infoIdx);
+
+    const vars = (session.sentResponses[0].body as DebugProtocol.VariablesResponse['body'])
+        .variables;
+    assert.equal(vars.length, 1);
+    assert.equal(vars[0].name, 'x');
+    assert.equal(vars[0].value, '99');
 });
