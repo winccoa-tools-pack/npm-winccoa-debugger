@@ -8,14 +8,17 @@ import { DatapointClient, DatapointConfig, IWinccoaManager } from '../../src/con
 // ---------------------------------------------------------------------------
 class MockWinccoaManager implements IWinccoaManager {
     public writtenValues = new Map<string, any>();
-    /** subscription id → { callback, dpeNames } */
-    private subscriptions = new Map<number, { callback: (values: any[], dpeNames: string[]) => void; dpeNames: string | string[] }>();
+    /** subscription id → { callback, dpeNames, answer } */
+    private subscriptions = new Map<number, { callback: (values: any[], dpeNames: string[]) => void; dpeNames: string | string[]; answer: boolean }>();
     private nextSubId = 1;
+    /** Track the `answer` flag passed to the most recent dpConnect call */
+    public lastDpConnectAnswer: boolean | undefined = undefined;
 
     /** Official API: callback is FIRST param, returns subscription id */
-    dpConnect(callback: (names: string[], values: any[], type?: any, error?: any) => void, dpeNames: string | string[], _answer?: boolean): number {
+    dpConnect(callback: (names: string[], values: any[], type?: any, error?: any) => void, dpeNames: string | string[], answer?: boolean): number {
         const id = this.nextSubId++;
-        this.subscriptions.set(id, { callback, dpeNames });
+        this.lastDpConnectAnswer = answer ?? false;
+        this.subscriptions.set(id, { callback, dpeNames, answer: answer ?? false });
         return id;
     }
 
@@ -287,4 +290,77 @@ test('DatapointClient: ID-quirk — stop event with command ID emits message AND
     assert.equal(emittedMsg![0], 'line: 26', 'msg[0] must be "line: N" (no UUID prefix)');
     assert.equal(emittedMsg![2], 'ScriptId: 0');
     assert.equal(emittedMsg![4], 'ThreadId: 0 (stopped) main');
+});
+
+test('DatapointClient: answerOnConnect=false passes answer=false to dpConnect', async () => {
+    const { client, api } = makeConnectedClient({ answerOnConnect: false });
+    await client.connect();
+    assert.equal(api.lastDpConnectAnswer, false, 'answer=false should be forwarded to dpConnect');
+});
+
+test('DatapointClient: answerOnConnect=true passes answer=true to dpConnect', async () => {
+    // answerOnConnect=true is required for stopOnEntry / DebugBreak():
+    // the script may have already hit DebugBreak() before the adapter connected,
+    // so we need the current (stale) Result DPE value delivered on connect.
+    const { client, api } = makeConnectedClient({ answerOnConnect: true });
+    await client.connect();
+    assert.equal(api.lastDpConnectAnswer, true, 'answer=true should be forwarded to dpConnect');
+});
+
+test('DatapointClient: answerOnConnect emits message from current DPE value on connect', async () => {
+    // When answer=true, dpConnect may fire IMMEDIATELY with the current DPE value.
+    // Simulate this by having the mock call the callback synchronously inside dpConnect
+    // (like WinCC OA does when answer=true and the DPE already has a value).
+    class ImmediateAnswerMock extends MockWinccoaManager {
+        override dpConnect(
+            callback: (names: string[], values: any[], type?: any, error?: any) => void,
+            dpeNames: string | string[],
+            answer?: boolean,
+        ): number {
+            const id = super.dpConnect(callback, dpeNames, answer);
+            if (answer) {
+                // Fire immediately: script was already stopped at DebugBreak() before connect
+                const dpName = Array.isArray(dpeNames) ? dpeNames[0] : dpeNames;
+                callback(
+                    [dpName as string],
+                    [
+                        [
+                            'line: 21',
+                            '/proj/scripts/stop_on_entry.ctl',
+                            'ScriptId: 3',
+                            'ScopeId: 0',
+                            'ThreadId: 1 (stopped) main',
+                        ],
+                    ],
+                );
+            }
+            return id;
+        }
+    }
+
+    const config: DatapointConfig = {
+        host: 'localhost',
+        port: 4999,
+        system: 'System1',
+        managerType: 'CTRL',
+        managerNumber: 3,
+        answerOnConnect: true,
+    };
+    const api = new ImmediateAnswerMock();
+    const client = new DatapointClient(config, api);
+
+    const messages: string[][] = [];
+    client.on('message', (msg: string[]) => messages.push(msg));
+
+    await client.connect();
+
+    // Allow microtasks/nextTick to flush
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(messages.length > 0, 'message event should fire on connect with answerOnConnect=true');
+    assert.match(messages[0]![0] ?? '', /^line:\s+21/, 'First message should be the pre-connect stop event');
+    assert.ok(
+        messages[0]!.some((s) => /ScriptId:\s*3/i.test(s)),
+        `Expected ScriptId: 3 in first message, got: ${JSON.stringify(messages[0])}`,
+    );
 });

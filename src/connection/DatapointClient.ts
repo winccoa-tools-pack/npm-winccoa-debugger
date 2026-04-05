@@ -110,6 +110,25 @@ export interface DatapointConfig {
      * not the CTRL manager number in `managerNumber` above.
      */
     connectionArgs?: string[];
+    /**
+     * When true, pass `answer=true` to the initial dpConnect on the Result DPE.
+     *
+     * `answer=true` fires the callback immediately with the CURRENT value of the
+     * Result DPE — even if no new value has arrived since the last subscription.
+     * This is required for `stopOnEntry` / `DebugBreak()` support:
+     *
+     * Flow without answerOnConnect:
+     *   script hits DebugBreak() → Result DPE written → (adapter not yet connected)
+     *   adapter connects with answer=false → misses the already-written stop event
+     *
+     * Flow with answerOnConnect=true:
+     *   script hits DebugBreak() → Result DPE written → thread waits
+     *   adapter connects with answer=true → receives current value immediately
+     *   → StoppedEvent delivered to VS Code before any timeout
+     *
+     * Default: false (backwards-compatible — normal attach to a running manager)
+     */
+    answerOnConnect?: boolean;
 }
 
 export interface DebugCommand {
@@ -241,8 +260,11 @@ export class DatapointClient extends EventEmitter {
                     this.handleResponse(values[0]);
                 },
                 resultDpe,
-                false, // answer=false: do NOT fire immediately with stale current value;
-                // only fire when .Result actually changes (= new response arrives)
+                // answer=true fires callback immediately with current DP value on connect.
+                // Required for stopOnEntry / DebugBreak(): the script may have already
+                // stopped before the adapter connected, so we need the stale value.
+                // Default false for normal attach (don't replay old responses).
+                this.config.answerOnConnect ?? false,
             );
 
             // dpConnect returns -1 when the DPE does not exist or the subscription

@@ -288,6 +288,65 @@ export class WinccoaProjectLifecycle {
 
     // ─── internal ──────────────────────────────────────────────────────────────
 
+    /**
+     * Starts a specific CTRL manager identified by its `-num N` flag.
+     *
+     * Scans the manager list via `pmon MGRLIST:LIST` and finds the entry whose
+     * `startOptions` contains `-num <managerNum>`.  Then starts it by index via
+     * `pmon SINGLE_MGR:START <index>`.
+     *
+     * Use this in tests to start a `manual`-mode manager after pmon is already
+     * running (e.g. the `-dbg CTRL_DEBUGBREAK` manager for stopOnEntry tests).
+     */
+    public async startManagerByNum(managerNum: number): Promise<void> {
+        this.requireAvailable();
+        const info = this.resolveInstallation();
+        if (!info) throw new Error('[WinccoaProjectLifecycle] WinCC OA installation not found');
+
+        const pmon = new PmonComponent();
+        pmon.setVersion(info.version);
+
+        const list = await pmon.getManagerOptionsList(this.projName);
+        const idx = list.findIndex((m) =>
+            m.startOptions?.includes(`-num ${managerNum}`),
+        );
+        if (idx < 0) {
+            throw new Error(
+                `[WinccoaProjectLifecycle] No manager with -num ${managerNum} found in manager list`,
+            );
+        }
+        console.log(
+            `[WinccoaProjectLifecycle] Starting manager -num ${managerNum} (index ${idx})…`,
+        );
+        await pmon.startManager(this.projName, idx);
+    }
+
+    /**
+     * Stops a specific CTRL manager identified by its `-num N` flag.
+     */
+    public async stopManagerByNum(managerNum: number): Promise<void> {
+        this.requireAvailable();
+        const info = this.resolveInstallation();
+        if (!info) throw new Error('[WinccoaProjectLifecycle] WinCC OA installation not found');
+
+        const pmon = new PmonComponent();
+        pmon.setVersion(info.version);
+
+        const list = await pmon.getManagerOptionsList(this.projName);
+        const idx = list.findIndex((m) =>
+            m.startOptions?.includes(`-num ${managerNum}`),
+        );
+        if (idx < 0) {
+            throw new Error(
+                `[WinccoaProjectLifecycle] No manager with -num ${managerNum} found in manager list`,
+            );
+        }
+        console.log(
+            `[WinccoaProjectLifecycle] Stopping manager -num ${managerNum} (index ${idx})…`,
+        );
+        await pmon.stopManager(this.projName, idx);
+    }
+
     private requireAvailable(): void {
         if (!this.isWinccoaAvailable()) {
             throw new Error(

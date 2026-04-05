@@ -7,3 +7,4 @@ WCCILevent       | always |      30 |        3 |        1 |
 WCCILdataSQLite  | always |      30 |        3 |        1 |
 WCCOActrl        | always |      30 |        3 |        1 | -num 1 -f scripts/debugTest.ctl
 WCCOActrl        | always |      30 |        3 |        1 | -num 2 -f scripts/bp_target.ctl
+WCCOActrl        | manual |      30 |        3 |        1 | -num 3 -f scripts/stop_on_entry.ctl -dbg CTRL_DEBUGBREAK
