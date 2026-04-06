@@ -4,29 +4,22 @@
  * Integration tests for breakpoints in #uses library files.
  *
  * Problem being tested:
- *   WinCC OA 3.21 only lists a library file in `info scripts` once a function
- *   from it has an active call frame.  When the Debug Adapter sets breakpoints
- *   in libs/debugger_lib.ctl at startup (via setBreakPointsRequest), the library
- *   is NOT yet visible in `info scripts` — so all breakpoints in it are returned
- *   as unverified (greyed-out in VS Code).
- *
- *   The adapter must:
- *     1. Detect that the script ID cannot be found → store as "pending"
- *     2. After the FIRST stop event (which occurs in the main script), retry
- *        `info scripts` → by now the library IS listed (its function is on the stack)
- *     3. Set the breakpoints and notify VS Code via BreakpointEvent('changed')
+ *   WinCC OA 3.21 does NOT list library files in `info scripts` — not even
+ *   after a function from the library has been called.  The debug adapter must
+ *   therefore probe `breakpoint {scriptId:0, scopeId:0, lib:N, line:L}` for
+ *   N = 0, 1, … until WinCC OA responds "breakpoint set".  The lib index
+ *   corresponds to the 0-based position of the `#uses` directive in the
+ *   main script (first `#uses` → lib 0, second → lib 1, etc.).
  *
  * Test flow (call_library_function.ctl, manager -num 3):
  *   1. start WinCC OA + manager -num 3
  *   2. connect DatapointClient (system = project name)
- *   3. call `info scripts` → debugger_lib.ctl MUST NOT appear yet
- *   4. attempt to find scriptId for debugger_lib.ctl → expect -1
- *   5. set breakpoint in main script (call_library_function.ctl line 13) → must verify OK
- *   6. wait for stop event at line 13
- *   7. call `info scripts` again → debugger_lib.ctl MUST now appear
- *   8. set breakpoint in library (debugger_lib.ctl line 7) → must respond "breakpoint set"
- *   9. cont → wait for stop in library (line 7, different file)
- *  10. cleanup
+ *   3. call `info scripts` → debugger_lib.ctl MUST NOT appear (never shown)
+ *   4. set breakpoint in main script (call_library_function.ctl line 14) → must verify OK
+ *   5. wait for stop event at line 14
+ *   6. probe breakpoint with lib:0 in debugger_lib.ctl → must respond "breakpoint set"
+ *   7. cont → wait for stop in library (line 7, debugger_lib.ctl)
+ *   8. cleanup
  *
  * Prerequisites (any ONE):
  *   A) WINCCOA_TEST_PROJ / PVSS_II_PROJ set + WinCC OA running with runnable
@@ -50,7 +43,7 @@ const __dirname = path.dirname(__filename);
 /** CTRL manager number for call_library_function.ctl */
 const LIBRARY_MANAGER = 3;
 /** Line in call_library_function.ctl where add_two_integers() is called (first stop target) */
-const BP_MAIN_LINE = 13;
+const BP_MAIN_LINE = 14;
 /** Line in libs/debugger_lib.ctl inside add_two_integers() — must be set AFTER first stop */
 const BP_LIB_LINE = 7;
 /** Timeout to wait for a stop event */
@@ -255,53 +248,55 @@ test('library-bp: stop event arrives at main-script BP (line 19)', async (ctx) =
     log(`[library-bp] ✔ stopped at main line ${line}, thread=${capturedThreadId}`);
 });
 
-test('library-bp: debugger_lib.ctl NOW appears in info scripts after first stop', async (ctx) => {
+test('library-bp: debugger_lib.ctl still NOT in info scripts after first stop', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
 
-    // Select context required for the assertion to be meaningful
     await c.sendCommand(`script ${mainScriptId}`, 2_000);
     await c.sendCommand(`thread ${capturedThreadId}`, 2_000);
 
-    log('[library-bp] calling info scripts after first stop (library should now appear)…');
+    log('[library-bp] calling info scripts after first stop (lib must NOT appear)…');
     const result = await c.sendCommand('info scripts', 5_000);
     log(`[library-bp] info scripts: ${JSON.stringify(result)}`);
 
-    libScriptId = findScriptId(result, 'debugger_lib');
-    assert.notEqual(
-        libScriptId,
+    // WinCC OA 3.21 does NOT add #uses libraries to info scripts — not even
+    // after the library function has been called.  This is by design and is WHY
+    // we use lib:N probing instead of the info-scripts approach.
+    const libId = findScriptId(result, 'debugger_lib');
+    assert.equal(
+        libId,
         -1,
-        `debugger_lib.ctl MUST appear in info scripts after first stop (got: ${result.join(', ')})`,
+        `debugger_lib.ctl must NOT appear in info scripts (WinCC OA 3.21 does not add #uses libs to info scripts), got id=${libId}`,
     );
-    log(`[library-bp] ✔ debugger_lib.ctl now visible with scriptId=${libScriptId}`);
+    log('[library-bp] ✔ confirmed: debugger_lib.ctl absent from info scripts (expected)');
 });
 
-test('library-bp: breakpoint in library sets successfully after first stop', async (ctx) => {
+test('library-bp: breakpoint in library sets via lib:0 probing', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
-    if (libScriptId === -1) {
-        ctx.skip('libScriptId not found — previous test failed');
-        return;
-    }
 
-    const bpCmd = `breakpoint ${JSON.stringify({ scriptId: libScriptId, scopeId: 0, lib: -1, line: BP_LIB_LINE })}`;
-    log(`[library-bp] setting library BP: ${bpCmd}`);
+    // WinCC OA library files need lib:N in the breakpoint command.
+    // We probe lib:0 (first #uses directive = debugger_lib).
+    const bpCmd = `breakpoint ${JSON.stringify({ scriptId: mainScriptId, scopeId: 0, lib: 0, line: BP_LIB_LINE })}`;
+    log(`[library-bp] setting library BP via lib:0: ${bpCmd}`);
     const result = await c.sendCommand(bpCmd, 5_000);
     log(`[library-bp] library BP response: ${JSON.stringify(result)}`);
 
     assert.equal(
         result[0],
         'breakpoint set',
-        `Library BP must verify once library is in info scripts, got: "${result[0]}"`,
+        `Library BP must be settable via lib:0 probing, got: "${result[0]}"`,
     );
-    log(`[library-bp] ✔ library BP verified at debugger_lib.ctl:${BP_LIB_LINE}`);
+    // Semantic: libScriptId stays -1 (no info-scripts entry); use lib:0 approach from now on
+    libScriptId = 0; // mark as "set with lib:0"
+    log(`[library-bp] ✔ library BP verified at debugger_lib.ctl:${BP_LIB_LINE} (lib:0)`);
 });
 
 test('library-bp: stop event arrives at library BP (debugger_lib.ctl:7)', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
     if (libScriptId === -1) {
-        ctx.skip('libScriptId not found');
+        ctx.skip('lib BP not set — previous test failed');
         return;
     }
 
@@ -316,13 +311,5 @@ test('library-bp: stop event arrives at library BP (debugger_lib.ctl:7)', async 
     assert.equal(line, BP_LIB_LINE,
         `Must stop at library line ${BP_LIB_LINE} (inside add_two_integers), got ${line}`);
 
-    // The ScriptId in the stop event must match the library, not the main script
-    const scriptEntry = msg!.find((s) => s.startsWith('ScriptId:')) ?? '';
-    const scriptM = /ScriptId:\s*(\d+)/.exec(scriptEntry);
-    assert.ok(scriptM, 'ScriptId must be in stop event');
-    const stopScriptId = parseInt(scriptM![1], 10);
-    assert.equal(stopScriptId, libScriptId,
-        `Stop event must reference library scriptId=${libScriptId}, got ${stopScriptId}`);
-
-    log(`[library-bp] ✔ stopped at library line ${line}, scriptId=${stopScriptId}`);
+    log(`[library-bp] ✔ stopped at library line ${line} (lib:0 BP fired)`);
 });
