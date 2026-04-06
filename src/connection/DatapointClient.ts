@@ -263,27 +263,44 @@ export class DatapointClient extends EventEmitter {
             // names[i]  = DPE name (e.g. "System1:_CtrlDebug_CTRL_5.Result")
             // values[i] = actual DPE value (dyn_string arriving as JS string[])
             const resultDpe = this.buildDpe('Result');
-            this.resultSubscriptionId = this.api.dpConnect(
-                (names: any[], values: any[]) => {
+
+            // The CTRL manager may not have created its _CtrlDebug_ DPs yet when
+            // we connect (pmon auto-starts managers asynchronously after the DM is
+            // ready).  dpConnect returns -1 if the DPE does not exist — poll with
+            // a 500 ms interval for up to 30 s before giving up.
+            const dpConnectCallback = (names: any[], values: any[]) => {
+                process.stderr.write(
+                    `[DatapointClient] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`,
+                );
+                this.handleResponse(values[0]);
+            };
+            const connectDeadlineMs = Date.now() + 30_000;
+            let dpConnectAttempts = 0;
+            while (this.resultSubscriptionId < 0 && Date.now() < connectDeadlineMs) {
+                dpConnectAttempts++;
+                this.resultSubscriptionId = this.api.dpConnect(
+                    dpConnectCallback,
+                    resultDpe,
+                    // answer=true fires callback immediately with current DP value on connect.
+                    // Required for stopOnEntry / DebugBreak(): the script may have already
+                    // stopped before the adapter connected, so we need the stale value.
+                    // Default false for normal attach (don't replay old responses).
+                    this.config.answerOnConnect ?? false,
+                );
+                if (this.resultSubscriptionId < 0) {
                     process.stderr.write(
-                        `[DatapointClient] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`,
+                        `[DatapointClient] dpConnect attempt ${dpConnectAttempts} failed for "${resultDpe}" — retrying in 500 ms…\n`,
                     );
-                    this.handleResponse(values[0]);
-                },
-                resultDpe,
-                // answer=true fires callback immediately with current DP value on connect.
-                // Required for stopOnEntry / DebugBreak(): the script may have already
-                // stopped before the adapter connected, so we need the stale value.
-                // Default false for normal attach (don't replay old responses).
-                this.config.answerOnConnect ?? false,
-            );
+                    await new Promise<void>((r) => setTimeout(r, 500));
+                }
+            }
 
             // dpConnect returns -1 when the DPE does not exist or the subscription
-            // failed.  Treat this as a hard error so callers get a clear message
-            // rather than a hanging connection that never delivers callbacks.
+            // failed.  After exhausting retries, surface a clear error so the test
+            // can skip gracefully rather than hanging forever.
             if (this.resultSubscriptionId < 0) {
                 throw new Error(
-                    `dpConnect failed for "${resultDpe}" (returned ${this.resultSubscriptionId}). ` +
+                    `dpConnect failed for "${resultDpe}" after ${dpConnectAttempts} attempt(s). ` +
                         `Ensure the CTRL manager is running and debug datapoints are initialised.`,
                 );
             }

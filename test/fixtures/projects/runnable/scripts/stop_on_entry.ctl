@@ -2,7 +2,7 @@
 // Test script for DebugBreak() / stop-on-entry integration tests.
 // Manager -num 2   Mode: manual   Flags: -dbg CTRL_DEBUGBREAK
 //
-// Expected stop at DebugBreak() on line 20.
+// Expected stop at DebugBreak() on line 22.
 // (Without -dbg CTRL_DEBUGBREAK, DebugBreak() is a no-op.)
 //
 // Test flow:
@@ -12,14 +12,14 @@
 //   4. Inspect locals: a=10, b=32
 //   5. Continue → script computes result=42 and exits
 //
-// STOP_LINE = 20  (DebugBreak())
+// STOP_LINE = 22  (DebugBreak())
 
 main()
 {
   int a = 10;
   int b = 32;
 
-  DebugBreak();           // line 20 — stop-on-entry point
+  DebugBreak();           // line 22 — stop-on-entry point
 
   int result = a + b;     // result = 42
   DebugN("stop_on_entry: a=" + a + " b=" + b + " result=" + result);

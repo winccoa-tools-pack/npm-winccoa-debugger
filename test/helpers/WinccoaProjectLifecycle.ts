@@ -159,6 +159,10 @@ export class WinccoaProjectLifecycle {
      * in the environment before attempting any real connection.
      */
     public isWinccoaAvailable(): boolean {
+        if (process.env['WINCCOA_EXTERNAL'] === '1') {
+            // Lifecycle is managed externally by the test runner — always considered available
+            return true;
+        }
         if (process.env['WINCCOA_SKIP'] === '1') return false;
         // Require an explicit project name to avoid calling the native addon with
         // a wrong project name and crashing with exit(1).
@@ -173,6 +177,10 @@ export class WinccoaProjectLifecycle {
      * is skipped (another process may already be running the project).
      */
     public async start(): Promise<void> {
+        if (process.env['WINCCOA_EXTERNAL'] === '1') {
+            // Lifecycle is owned by the test runner — nothing to do here.
+            return;
+        }
         this.requireAvailable();
         this.substituteConfigPlaceholders();
 
@@ -190,10 +198,19 @@ export class WinccoaProjectLifecycle {
         pmon.setVersion(info.version);
 
         // Register the project in /etc/opt/pvss/pvssInst.conf so pmon can find it.
+        // Skip registration (and the matching unregister-on-stop) if the project is
+        // already present in pvssInst.conf — this keeps it visible in the VS Code
+        // Project Admin extension after the test run finishes.
         const configFilePath = path.join(this.projPath, 'config', 'config');
-        console.log(`[WinccoaProjectLifecycle] Registering project "${this.projName}" …`);
-        await pmon.registerProject(configFilePath, info.version);
-        this.didRegisterProject = true;
+        if (this.isProjectRegisteredInPvssConf()) {
+            console.log(
+                `[WinccoaProjectLifecycle] Project "${this.projName}" already registered in pvssInst.conf — skipping registration`,
+            );
+        } else {
+            console.log(`[WinccoaProjectLifecycle] Registering project "${this.projName}" …`);
+            await pmon.registerProject(configFilePath, info.version);
+            this.didRegisterProject = true;
+        }
 
         // Restore clean SQLite databases from seeds so every test run starts fresh.
         this.restoreDbFromSeed();
@@ -215,9 +232,16 @@ export class WinccoaProjectLifecycle {
     /**
      * Stop pmon and wait for the port to close.
      * Safe to call even when start() was skipped.
-     * If start() registered the project, it will be unregistered on stop.
+     * The project registration in pvssInst.conf is intentionally kept so the
+     * project remains visible in the VS Code Project Admin extension after the
+     * test run finishes.  Set WINCCOA_UNREGISTER_ON_STOP=1 to override this
+     * and fully clean up the registration (useful in isolated CI containers).
      */
     public async stop(): Promise<void> {
+        if (process.env['WINCCOA_EXTERNAL'] === '1') {
+            // Lifecycle is owned by the test runner — nothing to do here.
+            return;
+        }
         this.requireAvailable();
 
         if (!(await isTcpReachable(this.host, this.port))) {
@@ -236,10 +260,14 @@ export class WinccoaProjectLifecycle {
         await waitForPortClosed(this.host, this.port, STOP_TIMEOUT_MS);
         console.log('[WinccoaProjectLifecycle] WinCC OA stopped');
 
-        if (this.didRegisterProject) {
+        if (this.didRegisterProject && process.env['WINCCOA_UNREGISTER_ON_STOP'] === '1') {
             console.log(`[WinccoaProjectLifecycle] Unregistering project "${this.projName}"…`);
             await pmon.unregisterProject(this.projName);
             this.didRegisterProject = false;
+        } else if (this.didRegisterProject) {
+            console.log(
+                `[WinccoaProjectLifecycle] Keeping project "${this.projName}" registered in pvssInst.conf (set WINCCOA_UNREGISTER_ON_STOP=1 to remove it)`,
+            );
         }
 
         this.restoreConfigPlaceholders();
@@ -400,6 +428,16 @@ export class WinccoaProjectLifecycle {
      * the config files stay as committed templates in version control.
      */
     private restoreConfigPlaceholders(): void {
+        if (process.env['WINCCOA_EXTERNAL'] === '1') {
+            // Runner owns the config files — skip per-file restore to avoid clobbering
+            return;
+        }
+        // Only wipe real values back to placeholders during a full CI cleanup.
+        // When the project stays registered (default for developer machines), keep
+        // real values so the project remains usable in VS Code Project Admin.
+        if (!this.didRegisterProject || process.env['WINCCOA_UNREGISTER_ON_STOP'] !== '1') {
+            return;
+        }
         const info = this.resolveInstallation();
         if (!info) return;
 
@@ -447,6 +485,27 @@ export class WinccoaProjectLifecycle {
             fs.copyFileSync(src, dst);
         }
         console.log(`[WinccoaProjectLifecycle] DB restored from seeds (${SEEDS_SQLITE_DIR})`);
+    }
+
+    /**
+     * Returns true when this project's path is already listed as an InstallationDir
+     * in pvssInst.conf — indicating that the project was registered (e.g. by the
+     * VS Code Project Admin extension) before the test run started.
+     * In that case start() skips registration and stop() skips unregistration,
+     * so the project remains visible to other tools after the test suite finishes.
+     */
+    private isProjectRegisteredInPvssConf(): boolean {
+        const pvssInstConfPath =
+            process.platform === 'win32'
+                ? 'C:\\ProgramData\\Siemens\\WinCC_OA\\pvssInst.conf'
+                : '/etc/opt/pvss/pvssInst.conf';
+        try {
+            const content = fs.readFileSync(pvssInstConfPath, 'utf-8');
+            // Each registered project has a line:  InstallationDir = "/path/to/project"
+            return content.includes(this.projPath);
+        } catch {
+            return false;
+        }
     }
 
     private resolveInstallation(): { installPath: string; version: string } | null {

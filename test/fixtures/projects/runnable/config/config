@@ -1,10 +1,7 @@
 [general]
-pvss_path = "<WinCC_OA_PATH>"
-proj_path = "<PROJ_DIR>"
-proj_version = "<WinCC_OA_VERSION>"
+pvss_path = "/opt/WinCC_OA/3.21"
+proj_path = "/home/testus/npm-winccoa-repos/npm-winccoa-debugger/test/fixtures/projects/runnable"
+proj_version = "3.21"
+useNGA = 1
 useSQLite = 1
 langs = "en_US.utf8"
-
-[ctrl]
-# Enable CTRL debugging
-loadCtrlLibs = 1

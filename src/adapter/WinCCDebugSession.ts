@@ -483,7 +483,7 @@ export class WinCCDebugSession extends DebugSession {
      * debug DPs of an already-running CTRL manager.
      *
      * To start a manager for debugging:
-     *   1. Add it to config/progs: WCCOActrl | manual | 30 | 3 | 1 | -num 5 -f scripts/loop.ctl
+     *   1. Add it to config/progs: WCCOActrl | manual | 30 | 3 | 1 | -num 5 loop.ctl
      *   2. Start it via pmon, the MCP server, or the WinCC OA Project Admin extension.
      *   3. Then launch/attach this debug adapter with manager.number = 5.
      */
