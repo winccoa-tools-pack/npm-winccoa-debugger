@@ -3,7 +3,7 @@
 // Manager -num 4   Mode: always
 //
 // Call chain: main() → compute_outer(n) → compute_inner(n, factor) → multiply_and_add(x,y,z)
-// A breakpoint at BP_LINE = 16 (inside multiply_and_add) lets tests verify:
+// A breakpoint at BP_LINE = 19 (inside multiply_and_add) lets tests verify:
 //   - 3-frame call stack with distinct locals at each frame
 //   - Step-over / step-into behaviour
 //
@@ -12,11 +12,11 @@
 //   compute_inner    : n=<counter>, factor=3
 //   compute_outer    : n=<counter>
 //
-// BP_LINE = 16  (int result = x * factor + z)
+// BP_LINE = 19  (int result = x * factor + z)
 
 int multiply_and_add(int x, int factor, int z)
 {
-  int result = x * factor + z;   // line 16 — BP target
+  int result = x * factor + z;   // line 19 — BP target
   return result;
 }
 

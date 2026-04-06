@@ -87,7 +87,7 @@ function parseArgs(args: string[]): CLIArgs {
 }
 
 function printUsage() {
-    process.stderr.write(`
+    process.stdout.write(`
 WinCC OA Debug Adapter
 
 Usage:
