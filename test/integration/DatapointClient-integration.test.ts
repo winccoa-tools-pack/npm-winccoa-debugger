@@ -17,7 +17,7 @@ import { printLocalIntegrationTestResult } from '../helpers/integration-teardown
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/debugger-poc');
+const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/runnable');
 const lifecycle = new WinccoaProjectLifecycle(PROJ_PATH);
 let client: DatapointClient | null = null;
 const testOutput = {

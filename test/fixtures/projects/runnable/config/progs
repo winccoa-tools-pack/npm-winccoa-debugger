@@ -3,4 +3,9 @@ version 1
 auth "" ""
 #Manager         | Start  | SecKill | Restart# | ResetMin | Options
 WCCILpmon        | manual |      30 |        3 |        1 |
-WCCOAui          | manual |      30 |        3 |        1 |-m gedi
+WCCILdataSQLite  | always |      30 |        3 |        1 |
+WCCILevent       | always |      30 |        3 |        1 |
+WCCOActrl        | always |      30 |        3 |        1 | -num 1 -f scripts/bp_basic_loop.ctl
+WCCOActrl        | manual |      30 |        3 |        1 | -num 2 -f scripts/stop_on_entry.ctl -dbg CTRL_DEBUGBREAK
+WCCOActrl        | always |      30 |        3 |        1 | -num 3 -f scripts/call_library_function.ctl
+WCCOActrl        | always |      30 |        3 |        1 | -num 4 -f scripts/callstack_depth3.ctl

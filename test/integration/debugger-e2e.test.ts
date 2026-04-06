@@ -7,14 +7,14 @@
  * - DatapointClient connects to a real WinCC OA project as a manager
  * - Sends actual GDB-style debug commands to _CtrlDebug_CTRL_1.Command
  * - Receives and validates responses from _CtrlDebug_CTRL_1.Result
- * - Tests the full debug workflow against debugTest.ctl:
+ * - Tests the full debug workflow against bp_basic_loop.ctl:
  *     break → info threads → print variable → continue → disconnect
  *
  * Prerequisites (any ONE of these):
  *   A) Set env WINCCOA_TEST_HOST / WINCCOA_TEST_PORT and have WinCC OA running
- *      with the debugger-poc project MANUALLY before running the tests.
+ *      with the runnable project MANUALLY before running the tests.
  *   B) Do nothing — the lifecycle helper will start WinCC OA automatically
- *      if it is installed and the debugger-poc project is registered.
+ *      if it is installed and the runnable project is registered.
  *   C) Set WINCCOA_SKIP=1 to skip all integration tests (useful in CI without
  *      a WinCC OA licence).
  *
@@ -37,7 +37,7 @@ const __dirname = path.dirname(__filename);
 
 // ─── lifecycle ───────────────────────────────────────────────────────────────
 
-const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/debugger-poc');
+const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/runnable');
 const lifecycle = new WinccoaProjectLifecycle(PROJ_PATH);
 let client: DatapointClient | null = null;
 const testLog = { stdout: '', stderr: '' };
@@ -143,13 +143,13 @@ test('e2e: info threads — lists running CTRL threads', async (ctx) => {
     assert.ok(result.length > 0, 'must receive at least one response element');
 });
 
-test('e2e: set breakpoint on debugTest.ctl line 8 (for loop start)', async (ctx) => {
+test('e2e: set breakpoint on bp_basic_loop.ctl line 13 (counter++)', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
 
-    // debugTest.ctl line 8: for (int i = 1; i <= 10; i++)
-    log('[e2e] Sending "break scripts/debugTest.ctl 8"…');
-    const result = await c.sendCommand('break scripts/debugTest.ctl 8', 10_000);
+    // bp_basic_loop.ctl line 13: counter++
+    log('[e2e] Sending "break scripts/bp_basic_loop.ctl 13"…');
+    const result = await c.sendCommand('break scripts/bp_basic_loop.ctl 13', 10_000);
     log(`[e2e] response: ${JSON.stringify(result)}`);
 
     assert.ok(Array.isArray(result));
@@ -163,13 +163,13 @@ test('e2e: set breakpoint on debugTest.ctl line 8 (for loop start)', async (ctx)
     );
 });
 
-test('e2e: set breakpoint on debugTest.ctl line 20 (inside if block)', async (ctx) => {
+test('e2e: set breakpoint on bp_basic_loop.ctl line 14 (DebugN after counter)', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
 
-    // debugTest.ctl line 20: DebugN("Halfway there!");
-    log('[e2e] Sending "break scripts/debugTest.ctl 20"…');
-    const result = await c.sendCommand('break scripts/debugTest.ctl 20', 10_000);
+    // bp_basic_loop.ctl line 14: DebugN("bp_basic_loop: counter = ...")
+    log('[e2e] Sending "break scripts/bp_basic_loop.ctl 14"…');
+    const result = await c.sendCommand('break scripts/bp_basic_loop.ctl 14', 10_000);
     log(`[e2e] response: ${JSON.stringify(result)}`);
 
     assert.ok(Array.isArray(result));

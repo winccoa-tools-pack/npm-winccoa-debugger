@@ -1,12 +1,12 @@
 /**
  * debugger-bp-cycle.test.ts
  *
- * Full breakpoint cycle integration test against bp_target.ctl (CTRL manager 2).
+ * Full breakpoint cycle integration test against bp_basic_loop.ctl (CTRL manager 1).
  *
  * Tests the complete WinCC OA 3.21 debug workflow:
- *   1. connect to DatapointClient (manager 2 = bp_target)
- *   2. info scripts → extract scriptId for bp_target.ctl
- *   3. breakpoint {scriptId, scopeId:0, lib:-1, line:11} (WinCC OA 3.21 format)
+ *   1. connect to DatapointClient (manager 1 = bp_basic_loop)
+ *   2. info scripts → extract scriptId for bp_basic_loop.ctl
+ *   3. breakpoint {scriptId, scopeId:0, lib:-1, line:13} (WinCC OA 3.21 format)
  *   4. wait for unsolicited stop event ("line: N" format)
  *   5. script N + thread N to set context
  *   6. bt → verify call stack
@@ -14,12 +14,12 @@
  *   8. cont → verify execution resumes (no second stop within timeout)
  *   9. delete-all → clean up
  *
- * bp_target.ctl:
- *   Line 11: counter++;   ← BP_LINE
+ * bp_basic_loop.ctl:
+ *   Line 13: counter++;   ← BP_LINE
  *   Runs forever, with delay(1) per iteration — reliable for BP testing.
  *
  * Prerequisites (any ONE):
- *   A) WINCCOA_TEST_PROJ / PVSS_II_PROJ set + WinCC OA running with debugger-poc
+ *   A) WINCCOA_TEST_PROJ / PVSS_II_PROJ set + WinCC OA running with runnable
  *   B) Auto-start via WinccoaProjectLifecycle (if WinCC OA installed, project registered)
  *   C) WINCCOA_SKIP=1 → all tests skipped
  */
@@ -37,16 +37,16 @@ const __dirname = path.dirname(__filename);
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-/** Line in bp_target.ctl where the BP is set: "    counter++;" */
-const BP_LINE = 11;
-/** CTRL manager number for bp_target.ctl */
-const BP_TARGET_MANAGER = 2;
+/** Line in bp_basic_loop.ctl where the BP is set: "    counter++;" */
+const BP_LINE = 13;
+/** CTRL manager number for bp_basic_loop.ctl */
+const BP_TARGET_MANAGER = 1;
 /** Timeout (ms) to wait for a stop event after setting the breakpoint */
 const STOP_EVENT_TIMEOUT_MS = 8_000;
 
 // ─── lifecycle ───────────────────────────────────────────────────────────────
 
-const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/debugger-poc');
+const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/runnable');
 const lifecycle = new WinccoaProjectLifecycle(PROJ_PATH);
 let client: DatapointClient | null = null;
 const testLog = { stdout: '', stderr: '' };
@@ -150,7 +150,7 @@ function waitForStopEvent(c: DatapointClient, timeoutMs: number): Promise<string
 let capturedScriptId = -1;
 let capturedThreadId = -1;
 
-test('bp-cycle: DatapointClient connects to bp_target CTRL manager', async (ctx) => {
+test('bp-cycle: DatapointClient connects to bp_basic_loop CTRL manager', async (ctx) => {
     if (!lifecycle.isWinccoaAvailable()) {
         ctx.skip('WinCC OA not available');
         return;
@@ -164,7 +164,7 @@ test('bp-cycle: DatapointClient connects to bp_target CTRL manager', async (ctx)
     log(`[bp-cycle] ✔ connected to _CtrlDebug_CTRL_${BP_TARGET_MANAGER}`);
 });
 
-test('bp-cycle: info scripts returns bp_target.ctl entry', async (ctx) => {
+test('bp-cycle: info scripts returns bp_basic_loop.ctl entry', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
 
@@ -178,17 +178,17 @@ test('bp-cycle: info scripts returns bp_target.ctl entry', async (ctx) => {
 
     assert.ok(Array.isArray(result) && result.length > 0, 'info scripts must return entries');
 
-    // Find bp_target.ctl in the script list
-    const entry = result.find((line) => line.toLowerCase().includes('bp_target'));
-    assert.ok(entry, `bp_target.ctl must appear in info scripts (got: ${result.join(', ')})`);
+    // Find bp_basic_loop.ctl in the script list
+    const entry = result.find((line) => line.toLowerCase().includes('bp_basic_loop'));
+    assert.ok(entry, `bp_basic_loop.ctl must appear in info scripts (got: ${result.join(', ')})`);
 
     const m = /ScriptId:\s*(\d+)/.exec(entry);
     assert.ok(m, `ScriptId must be present in: "${entry}"`);
     capturedScriptId = parseInt(m[1], 10);
-    log(`[bp-cycle] ✔ bp_target.ctl scriptId = ${capturedScriptId}`);
+    log(`[bp-cycle] ✔ bp_basic_loop.ctl scriptId = ${capturedScriptId}`);
 });
 
-test('bp-cycle: set breakpoint on bp_target.ctl line 11 (WinCC OA 3.21 format)', async (ctx) => {
+test('bp-cycle: set breakpoint on bp_basic_loop.ctl line 13 (WinCC OA 3.21 format)', async (ctx) => {
     const c = requireClient(ctx);
     if (!c) return;
     if (capturedScriptId === -1) {
@@ -262,8 +262,8 @@ test('bp-cycle: bt returns call stack after script+thread context', async (ctx) 
     // WinCC OA 3.21 backtrace format: "funcSignature at /abs/path.ctl:N"
     const frame0 = result[0];
     assert.ok(
-        frame0.includes('main') || frame0.includes('bp_target') || frame0.includes('at'),
-        `First frame must reference bp_target.ctl or main: "${frame0}"`,
+        frame0.includes('main') || frame0.includes('bp_basic_loop') || frame0.includes('at'),
+        `First frame must reference bp_basic_loop.ctl or main: "${frame0}"`,
     );
     log(`[bp-cycle] ✔ bt returned ${result.length} frame(s), frame[0]: "${frame0}"`);
 });

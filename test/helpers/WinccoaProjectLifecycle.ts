@@ -48,6 +48,12 @@ const DEFAULT_HOST = 'localhost';
 const DEFAULT_PORT = 4999;
 const DEFAULT_MANAGER_NUM = 99;
 
+/** Shared SQLite seed directory — clean DB snapshot used before each project start */
+const SEEDS_SQLITE_DIR = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname),
+    '../fixtures/seeds/sqlite',
+);
+
 /** How many ms to wait between port-availability polls */
 const POLL_INTERVAL_MS = 500;
 /** Total time to wait for WinCC OA Data Manager to be reachable */
@@ -188,6 +194,9 @@ export class WinccoaProjectLifecycle {
         console.log(`[WinccoaProjectLifecycle] Registering project "${this.projName}" …`);
         await pmon.registerProject(configFilePath, info.version);
         this.didRegisterProject = true;
+
+        // Restore clean SQLite databases from seeds so every test run starts fresh.
+        this.restoreDbFromSeed();
 
         // Start pmon detached — pmon auto-starts managers whose mode is 'always'.
         console.log(`[WinccoaProjectLifecycle] Starting WinCC OA project "${this.projName}"…`);
@@ -415,6 +424,29 @@ export class WinccoaProjectLifecycle {
                 .replace(new RegExp(escapeRegExp(info.version), 'g'), '<WinCC_OA_VERSION>');
             fs.writeFileSync(filePath, content, 'utf-8');
         }
+    }
+
+    /**
+     * Copies all *.sqlite files from the shared seeds directory into the project's
+     * db/wincc_oa/sqlite/ folder.  This resets the database to a known-good state
+     * before every test run, preventing stale data from prior runs.
+     */
+    private restoreDbFromSeed(): void {
+        const targetDir = path.join(this.projPath, 'db', 'wincc_oa', 'sqlite');
+        if (!fs.existsSync(SEEDS_SQLITE_DIR)) {
+            console.warn(
+                `[WinccoaProjectLifecycle] Seed directory not found: ${SEEDS_SQLITE_DIR} — skipping DB restore`,
+            );
+            return;
+        }
+        fs.mkdirSync(targetDir, { recursive: true });
+        for (const file of fs.readdirSync(SEEDS_SQLITE_DIR)) {
+            if (!file.endsWith('.sqlite')) continue;
+            const src = path.join(SEEDS_SQLITE_DIR, file);
+            const dst = path.join(targetDir, file);
+            fs.copyFileSync(src, dst);
+        }
+        console.log(`[WinccoaProjectLifecycle] DB restored from seeds (${SEEDS_SQLITE_DIR})`);
     }
 
     private resolveInstallation(): { installPath: string; version: string } | null {

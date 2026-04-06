@@ -9,7 +9,7 @@
  *
  * Tested script: scripts/stop_on_entry.ctl
  *   - Started via manager -num 3 with -dbg CTRL_DEBUGBREAK
- *   - Calls DebugBreak() at line 21 immediately on startup
+ *   - Calls DebugBreak() at line 20 immediately on startup
  *   - Thread halts indefinitely until "cont" is sent
  *
  * Test flow:
@@ -28,7 +28,7 @@
  *   B) WINCCOA_SKIP=1 → all tests skipped
  *
  * Running locally:
- *   WINCCOA_TEST_PROJ=debugger-poc npm run test:integration
+ *   WINCCOA_TEST_PROJ=runnable npm run test:integration
  */
 
 import test from 'node:test';
@@ -45,7 +45,7 @@ const __dirname = path.dirname(__filename);
 // ─── constants ───────────────────────────────────────────────────────────────
 
 /** CTRL manager number for stop_on_entry.ctl (manual, -dbg CTRL_DEBUGBREAK) */
-const STOP_ON_ENTRY_MANAGER = 3;
+const STOP_ON_ENTRY_MANAGER = 2;
 /** Milliseconds to wait for DebugBreak() to fire after manager start */
 const DEBUGBREAK_SETTLE_MS = 2_000;
 /** Timeout to receive the initial stop event via answer=true */
@@ -53,7 +53,7 @@ const INITIAL_STOP_TIMEOUT_MS = 5_000;
 
 // ─── lifecycle ───────────────────────────────────────────────────────────────
 
-const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/debugger-poc');
+const PROJ_PATH = path.resolve(__dirname, '../fixtures/projects/runnable');
 const lifecycle = new WinccoaProjectLifecycle(PROJ_PATH);
 let client: DatapointClient | null = null;
 const testLog = { stdout: '', stderr: '' };
@@ -189,7 +189,7 @@ test('DebugBreak: initial stop event received via answerOnConnect=true', async (
 
     log(`[stop-on-entry] Received stop event: ${JSON.stringify(stopMsg)}`);
 
-    // msg[0] = "line: 21"  (or similar — DebugBreak() is at line 21)
+    // msg[0] = "line: 20"  (or similar — DebugBreak() is at line 20)
     assert.match(stopMsg[0] ?? '', /^line:\s+\d+/i, 'First element must be "line: N"');
     // msg[2] = "ScriptId: N"
     assert.ok(
