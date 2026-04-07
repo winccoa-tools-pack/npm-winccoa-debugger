@@ -131,7 +131,7 @@ export class WinCCDebugSession extends DebugSession {
      * Stop context captured from the last unsolicited stop event.
      * Required to select the correct script/thread before bt/locals/print.
      */
-    private stopState: { scriptId: number; threadId: number; scopeId: number } | null = null;
+    private stopState: { scriptId: number; threadId: number; scopeId: number; libId?: number } | null = null;
 
     /**
      * Set to true when `stopOnEntry` is active. configurationDoneRequest
@@ -159,13 +159,28 @@ export class WinCCDebugSession extends DebugSession {
      *
      * WinCC OA library scripts loaded via `#uses` are compiled into the CTRL
      * manager and do NOT appear in `info scripts`.  To set a breakpoint in them
-     * we probe `breakpoint {scriptId:0, scopeId:0, lib:N, line:L}` for N = 0, 1, …
-     * until one succeeds, then cache the successful index.
+     * we probe `breakpoint {scriptId:S, scopeId:0, lib:N, line:L}` for every
+     * scriptId S from `info scripts` and N = 0, 1, … until one succeeds.
+     * Both the scriptId and lib index are cached for subsequent requests.
      *
      * The lib index corresponds to the 0-based position of the `#uses` directive
      * in the main script (first `#uses` → lib 0, second → lib 1, etc.).
      */
-    private libIndexCache = new Map<string, number>();
+    private libIndexCache = new Map<string, { scriptId: number; libIndex: number }>();
+
+    /** All active breakpoints by source path → line numbers. Used to reapply after delete-all. */
+    private bpRegistry = new Map<string, number[]>();
+
+    /** Reverse map: WinCC OA scriptId → absolute source path. Built as BPs are set. */
+    private scriptIdToPath = new Map<number, string>();
+
+    /**
+     * Serializes all setBreakpoints operations. VS Code sends concurrent
+     * setBreakpointsRequest calls (one per source file) — without serialization
+     * the concurrent delete-all + reapply sequences overlap and produce duplicate
+     * BPs in WinCC OA (causing the same line to fire twice per iteration).
+     */
+    private bpOperationQueue: Promise<void> = Promise.resolve();
 
     /** Maximum lib index to probe when searching for a library file. */
     private static readonly MAX_LIB_PROBE = 8;
@@ -265,10 +280,32 @@ export class WinCCDebugSession extends DebugSession {
                 const scopeEntry = msg.find((m) => m.startsWith('ScopeId:')) ?? '';
                 const scopeMatch = /ScopeId:\s*(\d+)/.exec(scopeEntry);
                 const scopeId = scopeMatch ? parseInt(scopeMatch[1], 10) : 0;
-                this.stopState = { scriptId, threadId, scopeId };
+                const libEntry = msg.find((m) => m.startsWith('lib:')) ?? '';
+                const libIdMatch = /LibId:\s*(-?\d+)/.exec(libEntry);
+                const libId = libIdMatch ? parseInt(libIdMatch[1], 10) : -1;
+                this.stopState = { scriptId, threadId, scopeId, ...(libId >= 0 && { libId }) };
+                const libSuffix = libId >= 0 ? `  lib:${libId}` : '';
                 this.log(
-                    `Stop at line ${lineNum}, thread ${threadId}, script ${scriptId}, scope ${scopeId}`,
+                    `\u23f9 Stopped at line ${lineNum}${libSuffix}  (scriptId=${scriptId} thread=${threadId})`,
                 );
+                // Spurious stop filter: if the stopped line has no registered BP in our
+                // registry (e.g. WinCC OA fired a queued stop for a just-removed BP),
+                // auto-continue without emitting a StoppedEvent.
+                // Only applies to main-script stops (libId === -1) and only when we know
+                // the scriptId → source path mapping.
+                if (!this.stopOnEntryPending && libId < 0) {
+                    const registeredPath = this.scriptIdToPath.get(scriptId);
+                    if (registeredPath !== undefined && this.bpRegistry.has(registeredPath)) {
+                        const registeredLines = this.bpRegistry.get(registeredPath)!;
+                        if (!registeredLines.includes(lineNum)) {
+                            this.log(
+                                `\u26a1 Spurious stop at line ${lineNum} (scriptId=${scriptId}) — BP removed, auto-continuing`,
+                            );
+                            this.client?.sendCommand('cont').catch(() => {});
+                            return;
+                        }
+                    }
+                }
                 // When stopOnEntry is pending, configurationDoneRequest will emit
                 // StoppedEvent('entry') after VS Code has processed the initial
                 // breakpoint list. Suppress the StoppedEvent here to avoid sending
@@ -412,6 +449,40 @@ export class WinCCDebugSession extends DebugSession {
         if (!this.stopState) return;
         await client.sendCommand(`script ${this.stopState.scriptId}`);
         await client.sendCommand(`thread ${this.stopState.threadId}`);
+    }
+
+    /**
+     * Delete all WinCC OA breakpoints and re-set every entry in bpRegistry.
+     * Eliminates stale/duplicate BPs that accumulate on repeated setBreakpoints calls.
+     */
+    private async reapplyAllBreakpoints(
+        client: DatapointClient,
+        infoResult: string[],
+    ): Promise<void> {
+        await client.sendCommand('delete-all');
+        for (const [filePath, lines] of this.bpRegistry) {
+            const basename = path.basename(filePath);
+            const sid = this.findScriptId(infoResult, basename);
+            if (sid !== -1) {
+                this.scriptIdToPath.set(sid, filePath);
+            }
+            for (const line of lines) {
+                try {
+                    let cmd: string;
+                    if (sid !== -1) {
+                        cmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: -1, line })}`;
+                    } else {
+                        const cached = this.libIndexCache.get(basename);
+                        if (!cached) continue; // pending — will be retried on next stop
+                        cmd = `breakpoint ${JSON.stringify({ scriptId: cached.scriptId, scopeId: 0, lib: cached.libIndex, line })}`;
+                    }
+                    const r = await client.sendCommand(cmd);
+                    this.log(`\u25cf BP ${r[0] === 'breakpoint set' ? 'set' : 'FAILED'}: ${basename}:${line}`);
+                } catch {
+                    // ignore — will surface as FAILED on next reapply
+                }
+            }
+        }
     }
 
     /**
@@ -655,6 +726,14 @@ export class WinCCDebugSession extends DebugSession {
         const sourcePath = args.source.path ?? args.source.name ?? '';
         const requestedBps = args.breakpoints ?? [];
 
+        // Always keep registry in sync, even before connected
+        if (requestedBps.length > 0) {
+            this.bpRegistry.set(sourcePath, requestedBps.map((bp) => bp.line));
+        } else {
+            this.bpRegistry.delete(sourcePath);
+            this.pendingBpRequests.delete(sourcePath);
+        }
+
         if (!this.client?.isConnected()) {
             // Return unverified — VS Code will re-request once connected
             response.body = {
@@ -668,83 +747,57 @@ export class WinCCDebugSession extends DebugSession {
         const scriptBasename = path.basename(sourcePath);
 
         const work = async () => {
-            // Query the loaded scripts list to get the numeric scriptId.
-            // WinCC OA identifies scripts by integer ID, not by file path.
-            // Retry up to 3 times with 200ms gaps (covers the ~300ms connect
-            // window + time for the script to begin execution and appear in
-            // 'info scripts' output). Keep low to avoid blocking the session
-            // when VS Code has stale breakpoints for non-existent scripts.
-            let scriptId = -1;
-            const maxAttempts = 3;
-            for (let attempt = 0; attempt < maxAttempts && scriptId === -1; attempt++) {
-                if (attempt > 0) {
-                    await new Promise<void>((resolve) => setTimeout(resolve, 200));
-                }
+            // Fetch current script list (retry to cover the ~300ms connect window)
+            let infoResult: string[] = [];
+            for (let attempt = 0; attempt < 3; attempt++) {
+                if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 200));
                 if (!client.isConnected()) break;
                 try {
-                    const infoResult = await client.sendCommand('info scripts');
-                    scriptId = this.findScriptId(infoResult, scriptBasename);
-                } catch {
-                    // ignore, retry
+                    infoResult = await client.sendCommand('info scripts');
+                    if (infoResult.length > 0) break;
+                } catch { /* retry */ }
+            }
+
+            // If this file not in info scripts and not yet lib-probed, probe now
+            const scriptId = this.findScriptId(infoResult, scriptBasename);
+            if (scriptId === -1 && requestedBps.length > 0 && !this.libIndexCache.has(scriptBasename)) {
+                const allIds = this.getAllScriptIds(infoResult);
+                outer: for (const sid of allIds) {
+                    for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
+                        if (!client.isConnected()) break outer;
+                        try {
+                            const probeCmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: probe, line: requestedBps[0].line })}`;
+                            const probeRes = await client.sendCommand(probeCmd, 500);
+                            if (probeRes[0] === 'breakpoint set') {
+                                this.libIndexCache.set(scriptBasename, { scriptId: sid, libIndex: probe });
+                                this.log(
+                                    `Library "${scriptBasename}" found at scriptId:${sid} lib:${probe}`,
+                                );
+                                break outer;
+                            }
+                        } catch { /* probe timed out — try next */ }
+                    }
                 }
             }
 
-            if (scriptId === -1) {
-                // Try lib-indexed breakpoints for library files loaded via `#uses`.
-                // WinCC OA never adds these to `info scripts` — we probe
-                // lib: 0, 1, 2, … until one responds "breakpoint set".
-                if (requestedBps.length > 0) {
-                    let foundLibIdx: number | undefined = this.libIndexCache.get(scriptBasename);
-                    if (foundLibIdx === undefined) {
-                        for (
-                            let probe = 0;
-                            probe < WinCCDebugSession.MAX_LIB_PROBE;
-                            probe++
-                        ) {
-                            if (!client.isConnected()) break;
-                            try {
-                                const probeCmd = `breakpoint ${JSON.stringify({ scriptId: 0, scopeId: 0, lib: probe, line: requestedBps[0].line })}`;
-                                const probeRes = await client.sendCommand(probeCmd, 1000);
-                                if (probeRes[0] === 'breakpoint set') {
-                                    foundLibIdx = probe;
-                                    this.libIndexCache.set(scriptBasename, probe);
-                                    this.log(
-                                        `Library "${scriptBasename}" found at lib:${probe} — BP at line ${requestedBps[0].line} verified`,
-                                    );
-                                    break;
-                                }
-                            } catch {
-                                // probe timed out or errored — try next index
-                            }
-                        }
-                    }
-                    if (foundLibIdx !== undefined) {
-                        // First BP was set via the probe; set any remaining BPs
-                        const libBreakpoints: Breakpoint[] = [
-                            new Breakpoint(true, requestedBps[0].line),
-                        ];
-                        for (let i = 1; i < requestedBps.length; i++) {
-                            try {
-                                const cmd = `breakpoint ${JSON.stringify({ scriptId: 0, scopeId: 0, lib: foundLibIdx, line: requestedBps[i].line })}`;
-                                const r = await client.sendCommand(cmd);
-                                libBreakpoints.push(
-                                    new Breakpoint(r[0] === 'breakpoint set', requestedBps[i].line),
-                                );
-                            } catch {
-                                libBreakpoints.push(new Breakpoint(false, requestedBps[i].line));
-                            }
-                        }
-                        // Remove any stale pending entry for this file
-                        this.pendingBpRequests.delete(sourcePath);
-                        response.body = { breakpoints: libBreakpoints };
-                        this.sendResponse(response);
-                        return;
-                    }
-                }
-                this.log(
-                    `Script "${scriptBasename}" not found via info scripts or lib probing — storing as pending`,
-                );
-                // Store pending so we can retry on the next stop event
+            // Refresh after probe in case scripts changed
+            try { infoResult = await client.sendCommand('info scripts'); } catch { /* ignore */ }
+
+            // delete-all + re-set every registered BP so no stale duplicates remain
+            await this.reapplyAllBreakpoints(client, infoResult);
+
+            if (requestedBps.length === 0) {
+                response.body = { breakpoints: [] };
+                this.sendResponse(response);
+                return;
+            }
+
+            const sidFinal = this.findScriptId(infoResult, scriptBasename);
+            const cachedLib = this.libIndexCache.get(scriptBasename);
+
+            if (sidFinal === -1 && !cachedLib) {
+                // Still unknown — store as pending for retry on next stop event
+                this.log(`Script "${scriptBasename}" not found — storing as pending`);
                 const bps = requestedBps.map((bp) => {
                     const b = new Breakpoint(false, bp.line);
                     return { bp: b, line: bp.line };
@@ -755,34 +808,26 @@ export class WinCCDebugSession extends DebugSession {
                 return;
             }
 
-            // Script found — remove any pending entry for this file
+            // BPs were applied by reapplyAllBreakpoints — report verified for this file
             this.pendingBpRequests.delete(sourcePath);
-
-            const breakpoints: Breakpoint[] = [];
-            for (const bp of requestedBps) {
-                try {
-                    // scopeId:0 and lib:-1 are required by WinCC OA 3.21 —
-                    // without them the engine accepts the command but never fires a stop event.
-                    const cmd = `breakpoint ${JSON.stringify({ scriptId, scopeId: 0, lib: -1, line: bp.line })}`;
-                    const result = await client.sendCommand(cmd);
-                    // WinCC OA responds with "breakpoint set" on success
-                    const verified = result[0] === 'breakpoint set';
-                    breakpoints.push(new Breakpoint(verified, bp.line));
-                } catch {
-                    breakpoints.push(new Breakpoint(false, bp.line));
-                }
-            }
-            response.body = { breakpoints };
+            response.body = {
+                breakpoints: requestedBps.map((bp) => new Breakpoint(true, bp.line)),
+            };
             this.sendResponse(response);
         };
 
-        work().catch((err: Error) => {
-            this.log(`setBreakpoints error: ${err.message}`);
-            response.body = {
-                breakpoints: requestedBps.map((bp) => new Breakpoint(false, bp.line)),
-            };
-            this.sendResponse(response);
-        });
+        // Serialize all BP operations: VS Code sends concurrent setBreakpoints
+        // requests (one per file). Without serialization the concurrent
+        // delete-all + reapply sequences race and create duplicate BPs in WinCC OA.
+        this.bpOperationQueue = this.bpOperationQueue
+            .then(() => work())
+            .catch((err: Error) => {
+                this.log(`setBreakpoints error: ${err.message}`);
+                response.body = {
+                    breakpoints: requestedBps.map((bp) => new Breakpoint(false, bp.line)),
+                };
+                this.sendResponse(response);
+            });
     }
 
     /**
@@ -833,33 +878,37 @@ export class WinCCDebugSession extends DebugSession {
 
                 // Not in info scripts — try lib:N probing (for #uses libraries)
                 if (bpList.length === 0) continue;
-                let foundLibIdx: number | undefined = this.libIndexCache.get(scriptBasename);
-                if (foundLibIdx === undefined) {
-                    for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
-                        if (!client.isConnected()) break;
-                        try {
-                            const probeCmd = `breakpoint ${JSON.stringify({ scriptId: 0, scopeId: 0, lib: probe, line: bpList[0].line })}`;
-                            const probeRes = await client.sendCommand(probeCmd, 1000);
-                            if (probeRes[0] === 'breakpoint set') {
-                                foundLibIdx = probe;
-                                this.libIndexCache.set(scriptBasename, probe);
-                                this.log(`Pending lib "${scriptBasename}" found at lib:${probe}`);
-                                break;
+                let cached = this.libIndexCache.get(scriptBasename);
+                if (cached === undefined) {
+                    const allIds = this.getAllScriptIds(infoResult);
+                    outer: for (const sid of allIds) {
+                        for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
+                            if (!client.isConnected()) break outer;
+                            try {
+                                const probeCmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: probe, line: bpList[0].line })}`;
+                                const probeRes = await client.sendCommand(probeCmd, 500);
+                                if (probeRes[0] === 'breakpoint set') {
+                                    cached = { scriptId: sid, libIndex: probe };
+                                    this.libIndexCache.set(scriptBasename, cached);
+                                    this.log(`Pending lib "${scriptBasename}" found at scriptId:${sid} lib:${probe}`);
+                                    break outer;
+                                }
+                            } catch {
+                                // probe timed out or errored — try next
                             }
-                        } catch {
-                            // probe timed out or errored — try next
                         }
                     }
                 }
-                if (foundLibIdx === undefined) continue;
+                if (cached === undefined) continue;
 
                 // Lib index found — first BP was set via probe; set remaining
+                const { scriptId: libSid, libIndex } = cached;
                 this.pendingBpRequests.delete(sourcePath);
                 bpList[0].bp.verified = true;
                 this.sendEvent(new BreakpointEvent('changed', bpList[0].bp));
                 for (let i = 1; i < bpList.length; i++) {
                     const { bp, line } = bpList[i];
-                    const cmd = `breakpoint ${JSON.stringify({ scriptId: 0, scopeId: 0, lib: foundLibIdx, line })}`;
+                    const cmd = `breakpoint ${JSON.stringify({ scriptId: libSid, scopeId: 0, lib: libIndex, line })}`;
                     client
                         .sendCommand(cmd)
                         .then((res) => {
@@ -896,6 +945,16 @@ export class WinCCDebugSession extends DebugSession {
         return -1;
     }
 
+    /** Extract all ScriptIds from an 'info scripts' response. */
+    private getAllScriptIds(result: string[]): number[] {
+        const ids: number[] = [];
+        for (const line of result) {
+            const m = /ScriptId:\s*(\d+)/.exec(line);
+            if (m) ids.push(parseInt(m[1], 10));
+        }
+        return ids;
+    }
+
     /**
      * Continue execution.
      * WinCC OA command: "cont"
@@ -914,6 +973,7 @@ export class WinCCDebugSession extends DebugSession {
         response: DebugProtocol.ContinueResponse,
         _args: DebugProtocol.ContinueArguments,
     ): void {
+        this.log('▶ Continue');
         response.body = { allThreadsContinued: true };
         this.sendResponse(response);
         if (this.client?.isConnected()) {
@@ -932,6 +992,7 @@ export class WinCCDebugSession extends DebugSession {
         response: DebugProtocol.NextResponse,
         _args: DebugProtocol.NextArguments,
     ): void {
+        this.log('→ Step Over');
         this.sendResponse(response);
         if (this.client?.isConnected()) {
             this.attachToStopContext(this.client)
@@ -950,6 +1011,7 @@ export class WinCCDebugSession extends DebugSession {
         response: DebugProtocol.StepInResponse,
         _args: DebugProtocol.StepInArguments,
     ): void {
+        this.log('↓ Step Into');
         this.sendResponse(response);
         if (this.client?.isConnected()) {
             this.attachToStopContext(this.client)
@@ -968,6 +1030,7 @@ export class WinCCDebugSession extends DebugSession {
         response: DebugProtocol.StepOutResponse,
         _args: DebugProtocol.StepOutArguments,
     ): void {
+        this.log('↑ Step Out');
         this.sendResponse(response);
         if (this.client?.isConnected()) {
             this.attachToStopContext(this.client)
@@ -984,6 +1047,7 @@ export class WinCCDebugSession extends DebugSession {
         response: DebugProtocol.PauseResponse,
         _args: DebugProtocol.PauseArguments,
     ): void {
+        this.log('⏸ Pause');
         const work = async () => {
             if (this.client?.isConnected()) {
                 // "b" = break/pause. WinCC OA responds with the stop event data

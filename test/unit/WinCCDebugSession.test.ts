@@ -215,8 +215,6 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
     // Inject the client into the session (simulate successful attach)
     (session as any).client = mock;
 
-    // info scripts returns one entry; breakpoint commands return success
-    const results: Record<string, string[]> = {};
     mock.sendCommand = async (cmd: string) => {
         mock.commands.push(cmd);
         if (cmd === 'info scripts') {
@@ -225,9 +223,8 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
         if (cmd.startsWith('breakpoint ')) {
             return ['breakpoint set'];
         }
-        return ['OK'];
+        return ['OK']; // delete-all etc.
     };
-    void results; // suppress unused warning
 
     const response = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
     const args: DebugProtocol.SetBreakpointsArguments = {
@@ -238,17 +235,29 @@ test('WinCCDebugSession: setBreakPointsRequest sets breakpoints when connected',
     session.setBreakPointsRequest(response, args);
     await new Promise((r) => setImmediate(r));
 
-    assert.equal(mock.commands[0], 'info scripts', 'First command must be info scripts');
-    assert.ok(mock.commands[1].startsWith('breakpoint '), 'Second command must be breakpoint');
-    assert.ok(mock.commands[2].startsWith('breakpoint '), 'Third command must be breakpoint');
+    // New contract: delete-all must be sent before any breakpoint commands
+    assert.ok(mock.commands.includes('info scripts'), 'info scripts must be called');
+    assert.ok(mock.commands.includes('delete-all'), 'delete-all must be sent to avoid duplicate BPs');
 
-    const bp1 = JSON.parse(mock.commands[1].slice('breakpoint '.length));
+    const deleteIdx = mock.commands.indexOf('delete-all');
+    const bpCmds = mock.commands.filter((c) => c.startsWith('breakpoint '));
+    assert.equal(bpCmds.length, 2, 'Must set exactly 2 breakpoints');
+
+    // All breakpoint commands must come after delete-all
+    bpCmds.forEach((cmd) => {
+        assert.ok(
+            mock.commands.indexOf(cmd) > deleteIdx,
+            `BP command "${cmd}" must come after delete-all`,
+        );
+    });
+
+    const bp1 = JSON.parse(bpCmds[0].slice('breakpoint '.length));
     assert.equal(bp1.scriptId, 7, 'scriptId must be 7');
     assert.equal(bp1.line, 5, 'line must be 5');
     assert.equal(bp1.scopeId, 0, 'scopeId must be 0 (required by WinCC OA 3.21)');
     assert.equal(bp1.lib, -1, 'lib must be -1 (required by WinCC OA 3.21)');
 
-    const bp2 = JSON.parse(mock.commands[2].slice('breakpoint '.length));
+    const bp2 = JSON.parse(bpCmds[1].slice('breakpoint '.length));
     assert.equal(bp2.scriptId, 7);
     assert.equal(bp2.line, 12);
     assert.equal(bp2.scopeId, 0);
@@ -734,4 +743,334 @@ test('WinCCDebugSession: variablesRequest sends script+thread context before inf
     assert.equal(vars.length, 1);
     assert.equal(vars[0].name, 'x');
     assert.equal(vars[0].value, '99');
+});
+
+// ---------------------------------------------------------------------------
+// Bug regression tests — derived from observed log in manual testing session
+//
+// Observed log (problem):
+//   ● BP set: call_library_function.ctl:17    ← initial
+//   ⏹ Stopped at line 17
+//   ● BP set: call_library_function.ctl:15    ← user adds BP:15
+//   ● BP set: call_library_function.ctl:17    ← reapply
+//   ● BP set: call_library_function.ctl:17    ← user removes BP:15
+//   ⏹ Stopped at line 15   ← BUG: removed BP still fires
+//   ⏹ Stopped at line 15   ← BUG: fires again
+// ---------------------------------------------------------------------------
+
+test('setBreakpoints: removing a BP — delete-all then only remaining line re-set', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    mock.sendCommand = async (cmd: string) => {
+        mock.commands.push(cmd);
+        if (cmd === 'info scripts') return ['ScriptId: 5; scripts/test.ctl'];
+        if (cmd.startsWith('breakpoint ')) return ['breakpoint set'];
+        return ['OK'];
+    };
+
+    // First call: set BP at lines 15 and 17
+    const resp1 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp1, {
+        source: { path: 'scripts/test.ctl' },
+        breakpoints: [{ line: 15 }, { line: 17 }],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Reset command log for clean assertion
+    mock.commands = [];
+
+    // Second call: remove BP:15 — only line 17 remains
+    const resp2 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp2, {
+        source: { path: 'scripts/test.ctl' },
+        breakpoints: [{ line: 17 }],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(mock.commands.includes('delete-all'), 'delete-all must be sent on BP removal');
+    const bpCmds = mock.commands.filter((c) => c.startsWith('breakpoint '));
+
+    // Only one BP must be set — line 17
+    assert.equal(bpCmds.length, 1, 'Exactly one BP must be re-set after removal');
+    const bp = JSON.parse(bpCmds[0].slice('breakpoint '.length));
+    assert.equal(bp.line, 17, 'Only line 17 must be re-set');
+
+    // Verify NO BP at line 15 was sent after delete-all
+    const stale = bpCmds.find((c) => {
+        try { return JSON.parse(c.slice('breakpoint '.length)).line === 15; } catch { return false; }
+    });
+    assert.equal(stale, undefined, 'No BP at removed line 15 must be re-set');
+});
+
+test('setBreakpoints: clearing all BPs — delete-all sent, no breakpoint command', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    mock.sendCommand = async (cmd: string) => {
+        mock.commands.push(cmd);
+        if (cmd === 'info scripts') return ['ScriptId: 5; scripts/test.ctl'];
+        if (cmd.startsWith('breakpoint ')) return ['breakpoint set'];
+        return ['OK'];
+    };
+
+    // Set BP first
+    const resp1 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp1, {
+        source: { path: 'scripts/test.ctl' },
+        breakpoints: [{ line: 17 }],
+    });
+    await new Promise((r) => setImmediate(r));
+    mock.commands = [];
+
+    // Clear all BPs for this file
+    const resp2 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp2, {
+        source: { path: 'scripts/test.ctl' },
+        breakpoints: [],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(mock.commands.includes('delete-all'), 'delete-all must be sent when clearing BPs');
+    const bpCmds = mock.commands.filter((c) => c.startsWith('breakpoint '));
+    assert.equal(bpCmds.length, 0, 'No breakpoint commands when no BPs remain');
+
+    const bps = (session.sentResponses.at(-1)!.body as DebugProtocol.SetBreakpointsResponse['body'])
+        .breakpoints;
+    assert.equal(bps.length, 0, 'Empty BP list in response');
+});
+
+test('setBreakpoints: adding BP for second file re-applies both files after delete-all', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    mock.sendCommand = async (cmd: string) => {
+        mock.commands.push(cmd);
+        if (cmd === 'info scripts') {
+            return [
+                'ScriptId: 3; scripts/fileA.ctl',
+                'ScriptId: 4; scripts/fileB.ctl',
+            ];
+        }
+        if (cmd.startsWith('breakpoint ')) return ['breakpoint set'];
+        return ['OK'];
+    };
+
+    // Register BP for file A
+    const resp1 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp1, {
+        source: { path: 'scripts/fileA.ctl' },
+        breakpoints: [{ line: 10 }],
+    });
+    await new Promise((r) => setImmediate(r));
+    mock.commands = [];
+
+    // Now add BP for file B → reapplyAllBreakpoints must re-set BOTH files
+    const resp2 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp2, {
+        source: { path: 'scripts/fileB.ctl' },
+        breakpoints: [{ line: 20 }],
+    });
+    await new Promise((r) => setImmediate(r));
+
+    assert.ok(mock.commands.includes('delete-all'), 'delete-all must clear all BPs');
+    const bpCmds = mock.commands.filter((c) => c.startsWith('breakpoint '));
+    assert.equal(bpCmds.length, 2, 'Must re-set BPs for BOTH files');
+
+    const lines = bpCmds.map((c) => JSON.parse(c.slice('breakpoint '.length)).line);
+    assert.ok(lines.includes(10), 'BP for fileA line 10 must be re-applied');
+    assert.ok(lines.includes(20), 'BP for fileB line 20 must be re-applied');
+});
+
+// --- stop event: lib: LibId parsing ---
+
+test('stop event: lib: LibId: 2 is parsed and stored in stopState', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    const attachResp = makeResponse<DebugProtocol.AttachResponse>('attach');
+    session.attachRequest(attachResp, defaultAttachArgs);
+    await new Promise((r) => setImmediate(r));
+    session.sentEvents = [];
+
+    mock.emit('message', [
+        'line: 7',
+        'lib: LibId: 2',
+        'ScriptId: 0',
+        'ScopeId: 0',
+        'ThreadId: 0 (stopped) main',
+    ]);
+    await new Promise((r) => setImmediate(r));
+
+    const stopState = (session as any).stopState as {
+        scriptId: number;
+        threadId: number;
+        scopeId: number;
+        libId?: number;
+    };
+    assert.ok(stopState, 'stopState must be set');
+    assert.equal(stopState.libId, 2, 'libId must be 2 from "lib: LibId: 2"');
+
+    const stopEvent = session.sentEvents.find((e) => e.event === 'stopped');
+    assert.ok(stopEvent, 'StoppedEvent must still be emitted for lib stop');
+});
+
+test('stop event: lib: LibId: -1 (main script) → no libId in stopState', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    const attachResp = makeResponse<DebugProtocol.AttachResponse>('attach');
+    session.attachRequest(attachResp, defaultAttachArgs);
+    await new Promise((r) => setImmediate(r));
+    session.sentEvents = [];
+
+    mock.emit('message', [
+        'line: 15',
+        'lib: LibId: -1',
+        'ScriptId: 5',
+        'ScopeId: 0',
+        'ThreadId: 0 (stopped) main',
+    ]);
+    await new Promise((r) => setImmediate(r));
+
+    const stopState = (session as any).stopState as { libId?: number };
+    assert.ok(stopState, 'stopState must be set');
+    assert.equal(stopState.libId, undefined, 'libId must be undefined for main script (LibId: -1)');
+});
+
+// --- spurious stop filter ---
+// When a BP is removed, WinCC OA may send a stop event for the old line before
+// delete-all takes effect. The adapter must detect this as spurious and auto-continue.
+
+test('stop event: spurious stop (no BP at line) auto-continues without StoppedEvent', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    const attachResp = makeResponse<DebugProtocol.AttachResponse>('attach');
+    session.attachRequest(attachResp, defaultAttachArgs);
+    await new Promise((r) => setImmediate(r));
+    session.sentEvents = [];
+    mock.commands = [];
+
+    // Simulate: only BP at line 17 registered for scriptId 5
+    (session as any).bpRegistry = new Map([['scripts/test.ctl', [17]]]);
+    (session as any).scriptIdToPath = new Map([[5, 'scripts/test.ctl']]);
+
+    // Stale stop at line 15 (BP was removed but WinCC OA had it queued)
+    mock.emit('message', [
+        'line: 15',
+        'lib: LibId: -1',
+        'ScriptId: 5',
+        'ScopeId: 0',
+        'ThreadId: 0 (stopped) main',
+    ]);
+    await new Promise((r) => setImmediate(r));
+
+    const stopEvent = session.sentEvents.find((e) => e.event === 'stopped');
+    assert.equal(stopEvent, undefined, 'No StoppedEvent for spurious stop at removed line');
+    assert.ok(mock.commands.includes('cont'), 'cont must be sent to auto-resume on spurious stop');
+});
+
+test('stop event: legit BP stop emits StoppedEvent and does NOT auto-continue', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    const attachResp = makeResponse<DebugProtocol.AttachResponse>('attach');
+    session.attachRequest(attachResp, defaultAttachArgs);
+    await new Promise((r) => setImmediate(r));
+    session.sentEvents = [];
+    mock.commands = [];
+
+    // BP at line 17 IS registered
+    (session as any).bpRegistry = new Map([['scripts/test.ctl', [17]]]);
+    (session as any).scriptIdToPath = new Map([[5, 'scripts/test.ctl']]);
+
+    mock.emit('message', [
+        'line: 17',
+        'lib: LibId: -1',
+        'ScriptId: 5',
+        'ScopeId: 0',
+        'ThreadId: 0 (stopped) main',
+    ]);
+    await new Promise((r) => setImmediate(r));
+
+    const stopEvent = session.sentEvents.find((e) => e.event === 'stopped');
+    assert.ok(stopEvent, 'StoppedEvent must be emitted for legit BP stop');
+    assert.equal(
+        mock.commands.includes('cont'),
+        false,
+        'cont must NOT be sent for a valid BP stop',
+    );
+});
+
+// --- setBreakpoints: serialization queue ---
+// VS Code sends setBreakpoints for every open file simultaneously (one call per
+// file). Without serialization the concurrent delete-all + reapply sequences race
+// and WinCC OA accumulates duplicate BPs → double stops. The bpOperationQueue
+// ensures calls run sequentially: the second call's work() only starts after the
+// first call's work() completes.
+
+test('setBreakpoints: concurrent calls are serialized — BPs set before second delete-all', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    mock.sendCommand = async (cmd: string) => {
+        mock.commands.push(cmd);
+        if (cmd === 'info scripts') {
+            return [
+                'ScriptId: 3; scripts/fileA.ctl',
+                'ScriptId: 4; scripts/fileB.ctl',
+            ];
+        }
+        if (cmd.startsWith('breakpoint ')) return ['breakpoint set'];
+        return ['OK'];
+    };
+
+    // Launch both setBreakpoints requests without awaiting — simulates VS Code
+    // sending concurrent requests for two source files.
+    const resp1 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    const resp2 = makeResponse<DebugProtocol.SetBreakpointsResponse>('setBreakpoints');
+    session.setBreakPointsRequest(resp1, {
+        source: { path: 'scripts/fileA.ctl' },
+        breakpoints: [{ line: 10 }],
+    });
+    session.setBreakPointsRequest(resp2, {
+        source: { path: 'scripts/fileB.ctl' },
+        breakpoints: [{ line: 20 }],
+    });
+
+    // Wait for both queued work() calls to drain.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const deleteIndices = mock.commands
+        .map((c, i) => (c === 'delete-all' ? i : -1))
+        .filter((i) => i >= 0);
+
+    assert.equal(deleteIndices.length, 2, 'delete-all must be sent exactly twice (once per setBreakpoints call)');
+
+    const [d1, d2] = deleteIndices;
+    const cmdsBetween = mock.commands.slice(d1 + 1, d2);
+    const bpsBetween = cmdsBetween.filter((c) => c.startsWith('breakpoint '));
+
+    assert.ok(
+        bpsBetween.length > 0,
+        `BPs from the first call must be set (${bpsBetween.length} found) ` +
+        `before the second delete-all runs (commands between d1..d2: ${cmdsBetween.join(', ')})`,
+    );
 });

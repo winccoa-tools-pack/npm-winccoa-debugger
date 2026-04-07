@@ -246,7 +246,6 @@ export class DatapointClient extends EventEmitter {
                 // manager authentication enabled (the common dev-project default).
                 try {
                     (this.api as any).setUserId(1);
-                    process.stderr.write(`[DatapointClient] setUserId(1) OK\n`);
                 } catch (e) {
                     process.stderr.write(
                         `[DatapointClient] setUserId(1) failed: ${(e as Error).message} — continuing anyway\n`,
@@ -268,10 +267,7 @@ export class DatapointClient extends EventEmitter {
             // we connect (pmon auto-starts managers asynchronously after the DM is
             // ready).  dpConnect returns -1 if the DPE does not exist — poll with
             // a 500 ms interval for up to 30 s before giving up.
-            const dpConnectCallback = (names: any[], values: any[]) => {
-                process.stderr.write(
-                    `[DatapointClient] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`,
-                );
+            const dpConnectCallback = (_names: any[], values: any[]) => {
                 this.handleResponse(values[0]);
             };
             const connectDeadlineMs = Date.now() + 30_000;
@@ -368,9 +364,7 @@ export class DatapointClient extends EventEmitter {
             // Official API: dpSetWait(dpeNames, values) → Promise<void>
             const commandDpe = this.buildDpe('Command');
             const payload = JSON.stringify(command);
-            process.stderr.write(`[DatapointClient] dpSetWait ${commandDpe} = ${payload}\n`);
             await this.api.dpSetWait(commandDpe, payload);
-            process.stderr.write(`[DatapointClient] dpSetWait confirmed\n`);
 
             // Wait for response
             return await responsePromise;
@@ -394,10 +388,6 @@ export class DatapointClient extends EventEmitter {
             if (!Array.isArray(value) || value.length === 0) {
                 return;
             }
-            process.stderr.write(
-                `[DatapointClient] handleResponse value: ${JSON.stringify(value)}\n`,
-            );
-
             const [id, ...result] = value as string[];
 
             // Find pending command
