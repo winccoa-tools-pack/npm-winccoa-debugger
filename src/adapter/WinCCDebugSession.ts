@@ -182,6 +182,17 @@ export class WinCCDebugSession extends DebugSession {
      */
     private bpOperationQueue: Promise<void> = Promise.resolve();
 
+    /**
+     * Interval timer that retries pending breakpoints every 500 ms after
+     * configurationDone. Breaks the chicken-and-egg where the CTRL script
+     * started too recently for 'info scripts' to list it during setBreakpoints.
+     * Auto-cancels once pendingBpRequests is empty.
+     */
+    private pendingBpRetryTimer: ReturnType<typeof setInterval> | undefined;
+
+    /** Prevents concurrent retryPendingBreakpoints executions from the timer and stop-event paths. */
+    private pendingBpRetryInFlight = false;
+
     /** Maximum lib index to probe when searching for a library file. */
     private static readonly MAX_LIB_PROBE = 8;
 
@@ -495,6 +506,10 @@ export class WinCCDebugSession extends DebugSession {
 
     /** Disconnect and clean up the DatapointClient */
     private async cleanupClient(): Promise<void> {
+        if (this.pendingBpRetryTimer) {
+            clearInterval(this.pendingBpRetryTimer);
+            this.pendingBpRetryTimer = undefined;
+        }
         if (this.client) {
             const c = this.client;
             this.client = null;
@@ -707,6 +722,9 @@ export class WinCCDebugSession extends DebugSession {
             this.sendEvent(new StoppedEvent('entry', threadId));
         } else {
             this.sendEvent(new ContinuedEvent(this.CTRL_THREAD_ID));
+            // Start timer to retry pending BPs in case info scripts was empty
+            // during setBreakpoints (CTRL script started too recently).
+            this.startPendingBpRetryTimer();
         }
     }
 
@@ -758,30 +776,23 @@ export class WinCCDebugSession extends DebugSession {
                 } catch { /* retry */ }
             }
 
-            // If this file not in info scripts and not yet lib-probed, probe now
+            // Library files (loaded via #uses) never appear in 'info scripts'.
+            // Probing for the lib index here by issuing a real breakpoint command has a
+            // side-effect: WinCC OA creates the BP, but the subsequent delete-all in
+            // reapplyAllBreakpoints does NOT reliably remove lib-index BPs.  The
+            // reapply then adds the lib BP a second time, producing duplicate BPs that
+            // fire twice per iteration at the calling line.
+            //
+            // Instead, defer library-file BPs to pendingBpRequests.
+            // retryPendingBreakpoints(), called on every stop event, performs the same
+            // probe but uses direct sendCommand (no delete-all + reapply), so only ONE
+            // BP is ever set.  This is safe because there is always at least one
+            // main-script stop (from the other BPs) before the library is entered.
+            //
+            // The only remaining upfront use of findScriptId: distinguish main-script
+            // files (scriptId ≥ 0) from library files (scriptId === -1) for the
+            // reapply path below.
             const scriptId = this.findScriptId(infoResult, scriptBasename);
-            if (scriptId === -1 && requestedBps.length > 0 && !this.libIndexCache.has(scriptBasename)) {
-                const allIds = this.getAllScriptIds(infoResult);
-                outer: for (const sid of allIds) {
-                    for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
-                        if (!client.isConnected()) break outer;
-                        try {
-                            const probeCmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: probe, line: requestedBps[0].line })}`;
-                            const probeRes = await client.sendCommand(probeCmd, 500);
-                            if (probeRes[0] === 'breakpoint set') {
-                                this.libIndexCache.set(scriptBasename, { scriptId: sid, libIndex: probe });
-                                this.log(
-                                    `Library "${scriptBasename}" found at scriptId:${sid} lib:${probe}`,
-                                );
-                                break outer;
-                            }
-                        } catch { /* probe timed out — try next */ }
-                    }
-                }
-            }
-
-            // Refresh after probe in case scripts changed
-            try { infoResult = await client.sendCommand('info scripts'); } catch { /* ignore */ }
 
             // delete-all + re-set every registered BP so no stale duplicates remain
             await this.reapplyAllBreakpoints(client, infoResult);
@@ -831,99 +842,114 @@ export class WinCCDebugSession extends DebugSession {
     }
 
     /**
-     * Retry setting breakpoints for sources that previously returned unverified
-     * because the file was not yet in 'info scripts'.
-     *
-     * Called after every stop event.  For library files loaded via `#uses` that
-     * never appear in 'info scripts', we also probe lib:0..MAX_LIB_PROBE.
-     * VS Code is notified via BreakpointEvent('changed') so it un-greys them.
+     * Start a 500 ms interval that calls retryPendingBreakpoints() until all
+     * pending BPs are resolved or the client disconnects.
+     * Safe to call multiple times — only one timer runs at a time.
      */
+    private startPendingBpRetryTimer(): void {
+        if (this.pendingBpRetryTimer) return;
+        this.pendingBpRetryTimer = setInterval(() => {
+            if (!this.client?.isConnected() || this.pendingBpRequests.size === 0) {
+                clearInterval(this.pendingBpRetryTimer);
+                this.pendingBpRetryTimer = undefined;
+                return;
+            }
+            this.retryPendingBreakpoints();
+        }, 500);
+    }
+
     private retryPendingBreakpoints(): void {
         if (!this.client?.isConnected() || this.pendingBpRequests.size === 0) return;
+        if (this.pendingBpRetryInFlight) return;
+        this.pendingBpRetryInFlight = true;
 
         const client = this.client;
         const snapshot = new Map(this.pendingBpRequests);
 
         const work = async () => {
-            let infoResult: string[];
             try {
-                infoResult = await client.sendCommand('info scripts', 3000);
-            } catch {
-                return;
-            }
+                let infoResult: string[];
+                try {
+                    infoResult = await client.sendCommand('info scripts', 3000);
+                } catch {
+                    return;
+                }
 
-            for (const [sourcePath, bpList] of snapshot) {
-                const scriptBasename = path.basename(sourcePath);
-                const scriptId = this.findScriptId(infoResult, scriptBasename);
+                for (const [sourcePath, bpList] of snapshot) {
+                    const scriptBasename = path.basename(sourcePath);
+                    const scriptId = this.findScriptId(infoResult, scriptBasename);
 
-                if (scriptId !== -1) {
-                    // Found in info scripts (non-library main script)
+                    if (scriptId !== -1) {
+                        // Found in info scripts (non-library main script)
+                        this.pendingBpRequests.delete(sourcePath);
+                        this.log(`Pending BPs for "${scriptBasename}" now settable (scriptId=${scriptId})`);
+                        for (const { bp, line } of bpList) {
+                            const cmd = `breakpoint ${JSON.stringify({ scriptId, scopeId: 0, lib: -1, line })}`;
+                            client
+                                .sendCommand(cmd)
+                                .then((res) => {
+                                    if (res[0] === 'breakpoint set') {
+                                        bp.verified = true;
+                                        this.sendEvent(new BreakpointEvent('changed', bp));
+                                        this.log(`Pending BP verified: ${scriptBasename}:${line}`);
+                                    }
+                                })
+                                .catch(() => {});
+                        }
+                        continue;
+                    }
+
+                    // Not in info scripts — try lib:N probing (for #uses libraries)
+                    if (bpList.length === 0) continue;
+                    let cached = this.libIndexCache.get(scriptBasename);
+                    if (cached === undefined) {
+                        const allIds = this.getAllScriptIds(infoResult);
+                        outer: for (const sid of allIds) {
+                            for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
+                                if (!client.isConnected()) break outer;
+                                try {
+                                    const probeCmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: probe, line: bpList[0].line })}`;
+                                    const probeRes = await client.sendCommand(probeCmd, 500);
+                                    if (probeRes[0] === 'breakpoint set') {
+                                        cached = { scriptId: sid, libIndex: probe };
+                                        this.libIndexCache.set(scriptBasename, cached);
+                                        this.log(`Pending lib "${scriptBasename}" found at scriptId:${sid} lib:${probe}`);
+                                        break outer;
+                                    }
+                                } catch {
+                                    // probe timed out or errored — try next
+                                }
+                            }
+                        }
+                    }
+                    if (cached === undefined) continue;
+
+                    // Lib index found — first BP was set via probe; set remaining
+                    const { scriptId: libSid, libIndex } = cached;
                     this.pendingBpRequests.delete(sourcePath);
-                    this.log(`Pending BPs for "${scriptBasename}" now settable (scriptId=${scriptId})`);
-                    for (const { bp, line } of bpList) {
-                        const cmd = `breakpoint ${JSON.stringify({ scriptId, scopeId: 0, lib: -1, line })}`;
+                    bpList[0].bp.verified = true;
+                    this.sendEvent(new BreakpointEvent('changed', bpList[0].bp));
+                    for (let i = 1; i < bpList.length; i++) {
+                        const { bp, line } = bpList[i];
+                        const cmd = `breakpoint ${JSON.stringify({ scriptId: libSid, scopeId: 0, lib: libIndex, line })}`;
                         client
                             .sendCommand(cmd)
                             .then((res) => {
                                 if (res[0] === 'breakpoint set') {
                                     bp.verified = true;
                                     this.sendEvent(new BreakpointEvent('changed', bp));
-                                    this.log(`Pending BP verified: ${scriptBasename}:${line}`);
+                                    this.log(`Pending lib BP verified: ${scriptBasename}:${line}`);
                                 }
                             })
                             .catch(() => {});
                     }
-                    continue;
                 }
-
-                // Not in info scripts — try lib:N probing (for #uses libraries)
-                if (bpList.length === 0) continue;
-                let cached = this.libIndexCache.get(scriptBasename);
-                if (cached === undefined) {
-                    const allIds = this.getAllScriptIds(infoResult);
-                    outer: for (const sid of allIds) {
-                        for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
-                            if (!client.isConnected()) break outer;
-                            try {
-                                const probeCmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: probe, line: bpList[0].line })}`;
-                                const probeRes = await client.sendCommand(probeCmd, 500);
-                                if (probeRes[0] === 'breakpoint set') {
-                                    cached = { scriptId: sid, libIndex: probe };
-                                    this.libIndexCache.set(scriptBasename, cached);
-                                    this.log(`Pending lib "${scriptBasename}" found at scriptId:${sid} lib:${probe}`);
-                                    break outer;
-                                }
-                            } catch {
-                                // probe timed out or errored — try next
-                            }
-                        }
-                    }
-                }
-                if (cached === undefined) continue;
-
-                // Lib index found — first BP was set via probe; set remaining
-                const { scriptId: libSid, libIndex } = cached;
-                this.pendingBpRequests.delete(sourcePath);
-                bpList[0].bp.verified = true;
-                this.sendEvent(new BreakpointEvent('changed', bpList[0].bp));
-                for (let i = 1; i < bpList.length; i++) {
-                    const { bp, line } = bpList[i];
-                    const cmd = `breakpoint ${JSON.stringify({ scriptId: libSid, scopeId: 0, lib: libIndex, line })}`;
-                    client
-                        .sendCommand(cmd)
-                        .then((res) => {
-                            if (res[0] === 'breakpoint set') {
-                                bp.verified = true;
-                                this.sendEvent(new BreakpointEvent('changed', bp));
-                                this.log(`Pending lib BP verified: ${scriptBasename}:${line}`);
-                            }
-                        })
-                        .catch(() => {});
-                }
+            } finally {
+                this.pendingBpRetryInFlight = false;
             }
         };
 
-        work().catch(() => {});
+        work().catch(() => { this.pendingBpRetryInFlight = false; });
     }
 
     /**

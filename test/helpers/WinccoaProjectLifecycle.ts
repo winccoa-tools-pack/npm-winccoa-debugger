@@ -232,10 +232,11 @@ export class WinccoaProjectLifecycle {
     /**
      * Stop pmon and wait for the port to close.
      * Safe to call even when start() was skipped.
-     * The project registration in pvssInst.conf is intentionally kept so the
-     * project remains visible in the VS Code Project Admin extension after the
-     * test run finishes.  Set WINCCOA_UNREGISTER_ON_STOP=1 to override this
-     * and fully clean up the registration (useful in isolated CI containers).
+     * If this lifecycle instance registered the project (didRegisterProject=true),
+     * the pvssInst.conf entry is always removed on stop so integration tests
+     * leave a clean state.
+     * If the project was already registered before start() was called, no
+     * registration change is made.
      */
     public async stop(): Promise<void> {
         if (process.env['WINCCOA_EXTERNAL'] === '1') {
@@ -260,14 +261,10 @@ export class WinccoaProjectLifecycle {
         await waitForPortClosed(this.host, this.port, STOP_TIMEOUT_MS);
         console.log('[WinccoaProjectLifecycle] WinCC OA stopped');
 
-        if (this.didRegisterProject && process.env['WINCCOA_UNREGISTER_ON_STOP'] === '1') {
+        if (this.didRegisterProject) {
             console.log(`[WinccoaProjectLifecycle] Unregistering project "${this.projName}"…`);
             await pmon.unregisterProject(this.projName);
             this.didRegisterProject = false;
-        } else if (this.didRegisterProject) {
-            console.log(
-                `[WinccoaProjectLifecycle] Keeping project "${this.projName}" registered in pvssInst.conf (set WINCCOA_UNREGISTER_ON_STOP=1 to remove it)`,
-            );
         }
 
         this.restoreConfigPlaceholders();
@@ -294,7 +291,7 @@ export class WinccoaProjectLifecycle {
         debugManagerNumber: number,
     ): DatapointConfig {
         return {
-            system: this.projName,
+            system: process.env['WINCCOA_TEST_SYSTEM'] ?? 'System1',
             host: this.host,
             port: this.port,
             managerType: debugManagerType,
@@ -432,10 +429,9 @@ export class WinccoaProjectLifecycle {
             // Runner owns the config files — skip per-file restore to avoid clobbering
             return;
         }
-        // Only wipe real values back to placeholders during a full CI cleanup.
-        // When the project stays registered (default for developer machines), keep
-        // real values so the project remains usable in VS Code Project Admin.
-        if (!this.didRegisterProject || process.env['WINCCOA_UNREGISTER_ON_STOP'] !== '1') {
+        // Restore placeholders whenever this instance registered the project
+        // (matches the always-unregister behaviour of stop()).
+        if (!this.didRegisterProject) {
             return;
         }
         const info = this.resolveInstallation();
