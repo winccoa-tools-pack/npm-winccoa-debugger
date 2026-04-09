@@ -110,9 +110,11 @@ export interface AttachRequestArguments extends DebugProtocol.AttachRequestArgum
 
 /** Identifies what a variablesReference points to */
 interface VarHandleInfo {
-    type: 'locals' | 'expression';
+    type: 'locals' | 'expression' | 'children';
     frameId?: number;
     expression?: string;
+    /** Pre-built child variables for composite types (dyn_*, mapping). */
+    children?: Variable[];
 }
 
 export class WinCCDebugSession extends DebugSession {
@@ -131,7 +133,12 @@ export class WinCCDebugSession extends DebugSession {
      * Stop context captured from the last unsolicited stop event.
      * Required to select the correct script/thread before bt/locals/print.
      */
-    private stopState: { scriptId: number; threadId: number; scopeId: number; libId?: number } | null = null;
+    private stopState: {
+        scriptId: number;
+        threadId: number;
+        scopeId: number;
+        libId?: number;
+    } | null = null;
 
     /**
      * Set to true when `stopOnEntry` is active. configurationDoneRequest
@@ -421,23 +428,105 @@ export class WinCCDebugSession extends DebugSession {
      *   {"const":0,"name":"counter","value":{"type":"int","varType":327680,"finalType":"int","value":7}}
      * Legacy fallback format: "varName = value"
      */
+    /**
+     * Format a scalar (primitive or string) for display.
+     * Strings are wrapped in double quotes; other primitives use String().
+     */
+    private formatScalar(value: unknown): string {
+        if (typeof value === 'string') return `"${value}"`;
+        return String(value ?? '');
+    }
+
+    /**
+     * Unwrap a single WinCC OA value object into DAP display fields.
+     *
+     * WinCC OA 3.21 value object shapes (confirmed from live adapter logs):
+     *   Scalar:  {"type":"int","varType":N,"finalType":"int","value":42}
+     *   String:  {"type":"string","varType":N,"finalType":"string","value":"hello"}
+     *   dyn_*:   {"type":"dyn_int","varType":N,"finalType":"dyn_int",
+     *              "value":[<valueObj>,<valueObj>,...]}
+     *   mapping: {"type":"mapping","varType":N,"finalType":"mapping",
+     *              "value":[{"key":"k","val":<valueObj>},...]}
+     */
+    private unwrapValue(inner: Record<string, unknown>): {
+        displayVal: string;
+        varRef: number;
+        indexedVariables?: number;
+        namedVariables?: number;
+    } {
+        const type = inner.type as string | undefined;
+        const rawValue = inner.value;
+
+        // ── mapping ───────────────────────────────────────────────────────────
+        if (type === 'mapping' && Array.isArray(rawValue)) {
+            const entries = rawValue as Array<{ key?: unknown; val?: unknown }>;
+            const len = entries.length;
+            const children = entries.map((entry) => {
+                const keyName = String(entry.key ?? '');
+                const valObj = entry.val as Record<string, unknown> | null | undefined;
+                if (valObj && typeof valObj === 'object' && !Array.isArray(valObj)) {
+                    const c = this.unwrapValue(valObj);
+                    return new Variable(keyName, c.displayVal, c.varRef, c.indexedVariables, c.namedVariables);
+                }
+                return new Variable(keyName, this.formatScalar(entry.val), 0);
+            });
+            const varRef = len > 0 ? this.allocVarHandle({ type: 'children', children }) : 0;
+            return { displayVal: `{${len}}`, varRef, namedVariables: len };
+        }
+
+        // ── dyn_* (array of value objects) ───────────────────────────────────
+        if (Array.isArray(rawValue)) {
+            const arr = rawValue as unknown[];
+            const len = arr.length;
+            const children = arr.map((item, i) => {
+                if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+                    const c = this.unwrapValue(item as Record<string, unknown>);
+                    return new Variable(`[${i}]`, c.displayVal, c.varRef, c.indexedVariables, c.namedVariables);
+                }
+                // Defensive fallback: plain primitive in array
+                return new Variable(`[${i}]`, this.formatScalar(item), 0);
+            });
+            const varRef = len > 0 ? this.allocVarHandle({ type: 'children', children }) : 0;
+            return { displayVal: `[${len}]`, varRef, indexedVariables: len };
+        }
+
+        // ── string ────────────────────────────────────────────────────────────
+        if (typeof rawValue === 'string') {
+            return { displayVal: `"${rawValue}"`, varRef: 0 };
+        }
+
+        // ── scalar (int, uint, float, double, bool, anytype) ──────────────────
+        return { displayVal: String(rawValue ?? ''), varRef: 0 };
+    }
+
+    /**
+     * Parse 'info thread' (or 'print') JSON lines into DAP Variable objects.
+     *
+     * WinCC OA 3.21 format (confirmed from live adapter logs):
+     *   {"const":0,"name":"vi","value":{"type":"int","varType":327680,"finalType":"int","value":42}}
+     *
+     * For dyn_* types, value.value is an array of nested value objects.
+     * For mapping, value.value is an array of {"key":"k","val":{...}} objects.
+     */
     private parseVariables(result: string[]): Variable[] {
         const variables: Variable[] = [];
         for (const line of result) {
             // Try JSON format first (WinCC OA 3.21)
             try {
                 const obj = JSON.parse(line) as Record<string, unknown>;
-                if (obj && typeof obj.name === 'string' && obj.name) {
-                    const inner = obj.value as Record<string, unknown> | null | undefined;
-                    const displayVal =
-                        inner !== null &&
-                        inner !== undefined &&
-                        typeof inner === 'object' &&
-                        'value' in inner
-                            ? String(inner.value)
-                            : String(obj.value ?? '');
-                    variables.push(new Variable(obj.name, displayVal, 0));
+                if (!obj || typeof obj.name !== 'string' || !obj.name) continue;
+
+                const inner = obj.value as Record<string, unknown> | null | undefined;
+                if (inner === null || inner === undefined || typeof inner !== 'object') {
+                    variables.push(new Variable(obj.name, String(obj.value ?? ''), 0));
+                    continue;
                 }
+
+                const { displayVal, varRef, indexedVariables, namedVariables } =
+                    this.unwrapValue(inner);
+                variables.push(
+                    new Variable(obj.name, displayVal, varRef, indexedVariables, namedVariables),
+                );
             } catch {
                 // Legacy fallback: "varName = value"
                 const eqIdx = line.indexOf(' = ');
@@ -488,7 +577,9 @@ export class WinCCDebugSession extends DebugSession {
                         cmd = `breakpoint ${JSON.stringify({ scriptId: cached.scriptId, scopeId: 0, lib: cached.libIndex, line })}`;
                     }
                     const r = await client.sendCommand(cmd);
-                    this.log(`\u25cf BP ${r[0] === 'breakpoint set' ? 'set' : 'FAILED'}: ${basename}:${line}`);
+                    this.log(
+                        `\u25cf BP ${r[0] === 'breakpoint set' ? 'set' : 'FAILED'}: ${basename}:${line}`,
+                    );
                 } catch {
                     // ignore — will surface as FAILED on next reapply
                 }
@@ -746,7 +837,10 @@ export class WinCCDebugSession extends DebugSession {
 
         // Always keep registry in sync, even before connected
         if (requestedBps.length > 0) {
-            this.bpRegistry.set(sourcePath, requestedBps.map((bp) => bp.line));
+            this.bpRegistry.set(
+                sourcePath,
+                requestedBps.map((bp) => bp.line),
+            );
         } else {
             this.bpRegistry.delete(sourcePath);
             this.pendingBpRequests.delete(sourcePath);
@@ -773,7 +867,9 @@ export class WinCCDebugSession extends DebugSession {
                 try {
                     infoResult = await client.sendCommand('info scripts');
                     if (infoResult.length > 0) break;
-                } catch { /* retry */ }
+                } catch {
+                    /* retry */
+                }
             }
 
             // Library files (loaded via #uses) never appear in 'info scripts'.
@@ -882,7 +978,9 @@ export class WinCCDebugSession extends DebugSession {
                     if (scriptId !== -1) {
                         // Found in info scripts (non-library main script)
                         this.pendingBpRequests.delete(sourcePath);
-                        this.log(`Pending BPs for "${scriptBasename}" now settable (scriptId=${scriptId})`);
+                        this.log(
+                            `Pending BPs for "${scriptBasename}" now settable (scriptId=${scriptId})`,
+                        );
                         for (const { bp, line } of bpList) {
                             const cmd = `breakpoint ${JSON.stringify({ scriptId, scopeId: 0, lib: -1, line })}`;
                             client
@@ -913,7 +1011,9 @@ export class WinCCDebugSession extends DebugSession {
                                     if (probeRes[0] === 'breakpoint set') {
                                         cached = { scriptId: sid, libIndex: probe };
                                         this.libIndexCache.set(scriptBasename, cached);
-                                        this.log(`Pending lib "${scriptBasename}" found at scriptId:${sid} lib:${probe}`);
+                                        this.log(
+                                            `Pending lib "${scriptBasename}" found at scriptId:${sid} lib:${probe}`,
+                                        );
                                         break outer;
                                     }
                                 } catch {
@@ -949,7 +1049,9 @@ export class WinCCDebugSession extends DebugSession {
             }
         };
 
-        work().catch(() => { this.pendingBpRetryInFlight = false; });
+        work().catch(() => {
+            this.pendingBpRetryInFlight = false;
+        });
     }
 
     /**
@@ -1160,6 +1262,12 @@ export class WinCCDebugSession extends DebugSession {
 
         const client = this.client;
         const work = async () => {
+            // 'children' type: children are pre-built in parseVariables — no commands needed
+            if (handleInfo.type === 'children') {
+                response.body = { variables: handleInfo.children ?? [] };
+                return this.sendResponse(response);
+            }
+
             await this.attachToStopContext(client);
             let result: string[];
             if (handleInfo.type === 'locals') {
