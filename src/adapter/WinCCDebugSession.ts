@@ -170,15 +170,19 @@ export class WinCCDebugSession extends DebugSession {
     private pendingBpRequests = new Map<string, Array<{ bp: Breakpoint; line: number }>>();
 
     /**
-     * Cache of library file basename → WinCC OA LibId used in breakpoint command.
+     * Cache of library file basename → WinCC OA lib index used in breakpoint command.
      *
      * WinCC OA library scripts loaded via `#uses` are compiled into the CTRL
      * manager and do NOT appear in `info scripts`.  To set a breakpoint in them
-     * we call `info libs` to discover the numeric LibId assigned by WinCC OA,
-     * then use `breakpoint {scriptId:-1, scopeId:0, lib:<LibId>, line:L}`.
+     * we need the lib index.  Two discovery strategies:
      *
-     * The LibId is assigned by the CTRL runtime and can be any non-negative
-     * integer (not necessarily sequential).
+     * 1. `info libs` — returns `lib: <id> <path>` lines.  Works when the CTRL
+     *    runtime reports the library (not always the case with remote attach).
+     * 2. **Probing** — try `breakpoint {scriptId:<mainId>, lib:N, line:L}` for
+     *    N = 0,1,2,… until WinCC OA responds "breakpoint set".  This is the
+     *    approach used by the original CTRL debugger (Ctrl_DebuggerLauncher.ctl)
+     *    and the integration tests.  The lib index corresponds to the 0-based
+     *    position of the `#uses` directive in the main script.
      */
     private libIndexCache = new Map<string, { libId: number; libPath: string }>();
 
@@ -624,34 +628,39 @@ export class WinCCDebugSession extends DebugSession {
     /**
      * Delete all WinCC OA breakpoints and re-set every entry in bpRegistry.
      * Eliminates stale/duplicate BPs that accumulate on repeated setBreakpoints calls.
+     *
+     * For library files (#uses), WinCC OA requires a lib index in the breakpoint
+     * command.  The old CTRL-based debugger (Ctrl_DebuggerLauncher.ctl) solved this
+     * by force-loading each library with execScript and then reading info libs.
+     * We cannot execScript from Node.js, so we probe lib:0..N synchronously here
+     * (same approach as the integration tests).
      */
     private async reapplyAllBreakpoints(
         client: DatapointClient,
         infoResult: string[],
     ): Promise<void> {
         await client.sendCommand('delete-all');
+
+        // Set main-script BPs and collect the main scriptId.
+        // Library BPs (#uses) are NOT set here — WinCC OA requires them to be
+        // set after the first real stop at a main-script BP (not during the
+        // initial DebugBreak pause).  They are handled by retryPendingBreakpoints()
+        // which fires on each stop event.
         for (const [filePath, lines] of this.bpRegistry) {
             const basename = path.basename(filePath);
             const sid = this.findScriptId(infoResult, basename);
             if (sid !== -1) {
                 this.scriptIdToPath.set(sid, filePath);
-            }
-            for (const line of lines) {
-                try {
-                    let cmd: string;
-                    if (sid !== -1) {
-                        cmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: -1, line })}`;
-                    } else {
-                        const cached = this.libIndexCache.get(basename.toLowerCase());
-                        if (!cached) continue; // pending — will be retried via fetchLibraryMap
-                        cmd = `breakpoint ${JSON.stringify({ scriptId: -1, scopeId: 0, lib: cached.libId, line })}`;
+                for (const line of lines) {
+                    try {
+                        const cmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: -1, line })}`;
+                        const r = await client.sendCommand(cmd);
+                        this.log(
+                            `\u25cf BP ${r[0] === 'breakpoint set' ? 'set' : 'FAILED'}: ${basename}:${line}`,
+                        );
+                    } catch {
+                        // ignore — will surface as FAILED on next reapply
                     }
-                    const r = await client.sendCommand(cmd);
-                    this.log(
-                        `\u25cf BP ${r[0] === 'breakpoint set' ? 'set' : 'FAILED'}: ${basename}:${line}`,
-                    );
-                } catch {
-                    // ignore — will surface as FAILED on next reapply
                 }
             }
         }
@@ -959,11 +968,12 @@ export class WinCCDebugSession extends DebugSession {
             }
 
             const sidFinal = this.findScriptId(infoResult, scriptBasename);
-            const cachedLib = this.libIndexCache.get(scriptBasename.toLowerCase());
 
-            if (sidFinal === -1 && !cachedLib) {
-                // Still unknown — store as pending for retry on next stop event
-                this.log(`Script "${scriptBasename}" not found — storing as pending`);
+            if (sidFinal === -1) {
+                // Library or unknown script — store as pending.
+                // Library BPs (#uses) can only be set after the first real stop
+                // at a main-script BP, so retryPendingBreakpoints() will handle them.
+                this.log(`Script "${scriptBasename}" not in info scripts — storing as pending (library?)`);
                 const bps = requestedBps.map((bp) => {
                     const b = new Breakpoint(false, bp.line);
                     return { bp: b, line: bp.line };
@@ -1059,25 +1069,31 @@ export class WinCCDebugSession extends DebugSession {
                         continue;
                     }
 
-                    // Not in info scripts — check libIndexCache (populated by fetchLibraryMap)
+                    // Not in info scripts — treat as library.
+                    // Use the libId from `info libs` (fetchLibraryMap) — this is the
+                    // correct global library index. WinCC OA accepts "breakpoint set"
+                    // for ALL lib indices, but BPs only fire at the correct one.
+                    // The lib BP must be set AFTER the first real stop (not during DebugBreak).
                     if (bpList.length === 0) continue;
                     const cached = this.libIndexCache.get(scriptBasename.toLowerCase());
-                    if (!cached) continue;
 
-                    // Library found — set all BPs using scriptId:-1 and the real libId
+                    if (!cached) continue; // not yet discovered — will retry on next stop
+
+                    // Library found via info libs — set all BPs using the correct libId
                     this.pendingBpRequests.delete(sourcePath);
                     this.log(
-                        `Pending lib "${scriptBasename}" resolved via info libs (libId=${cached.libId})`,
+                        `Pending lib "${scriptBasename}" resolved (libId=${cached.libId})`,
                     );
                     for (const { bp, line } of bpList) {
-                        const cmd = `breakpoint ${JSON.stringify({ scriptId: -1, scopeId: 0, lib: cached.libId, line })}`;
+                        const ctxId = [...this.scriptIdToPath.keys()][0] ?? 0;
+                        const cmd = `breakpoint ${JSON.stringify({ scriptId: ctxId, scopeId: 0, lib: cached.libId, line })}`;
                         client
                             .sendCommand(cmd)
                             .then((res) => {
                                 if (res[0] === 'breakpoint set') {
                                     bp.verified = true;
                                     this.sendEvent(new BreakpointEvent('changed', bp));
-                                    this.log(`Pending lib BP verified: ${scriptBasename}:${line}`);
+                                    this.log(`Pending lib BP verified: ${scriptBasename}:${line} (lib:${cached.libId})`);
                                 }
                             })
                             .catch(() => {});
