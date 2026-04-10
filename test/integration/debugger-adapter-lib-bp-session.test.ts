@@ -9,10 +9,11 @@
  *   `info scripts`, not even after a function from that library has been
  *   called.  The VS Code adapter must therefore:
  *     1. Detect that the requested source file is NOT in `info scripts`.
- *     2. Probe `breakpoint {scriptId, scopeId:0, lib:N, line}` for
- *        N = 0, 1, 2 … until WinCC OA acknowledges "breakpoint set".
- *     3. Cache the resolved index (libIndexCache) to avoid re-probing on
- *        subsequent setBreakpoints calls.
+ *     2. Call `info libs` to discover loaded libraries and their numeric
+ *        LibIds (format: "lib: <id> <path>").
+ *     3. Use `scriptId: -1` and the real LibId from `info libs` when
+ *        setting breakpoints in library files.
+ *     4. Cache the resolved LibId (libIndexCache) to avoid re-querying.
  *
  *   Without the fix, `setBreakPointsRequest` for debugger_lib.ctl returns
  *   `verified: false` and the script never stops in the library.
@@ -23,7 +24,7 @@
  *   1. Attach WinCCDebugSession to CTRL manager 3 (call_library_function.ctl).
  *   2. Set breakpoint for call_library_function.ctl:14 → verified: true.
  *   3. Wait for first StoppedEvent at main line 14 (proves main BP works).
- *   4. Set breakpoint for debugger_lib.ctl:7 → adapter probes lib:N.
+ *   4. Set breakpoint for debugger_lib.ctl:7 → adapter uses info libs.
  *      Assert response verified: true.
  *   5. Send continueRequest → wait for StoppedEvent at lib line 7.
  *      Assert event arrived (lib stops bypass the spurious stop filter
@@ -253,7 +254,7 @@ test('adapter-lib-bp: StoppedEvent arrives at main BP line 14', async (ctx) => {
     log(`✔ StoppedEvent received at main script`);
 });
 
-test('adapter-lib-bp: setBreakpoints for library file probes lib:N (verified=true)', async (ctx) => {
+test('adapter-lib-bp: setBreakpoints for library file uses info libs (verified=true)', async (ctx) => {
     const s = requireSession(ctx);
     if (!s) return;
 
@@ -266,7 +267,7 @@ test('adapter-lib-bp: setBreakpoints for library file probes lib:N (verified=tru
             const newResp = s.sentResponses.slice(origLen).find(r => r.command === 'setBreakpoints');
             if (newResp) { clearInterval(interval); resolve(newResp as DebugProtocol.SetBreakpointsResponse); }
         }, 50);
-        // Probing lib:0…lib:7 takes some time — give it 12 seconds
+        // info libs lookup + BP set — give it 12 seconds
         setTimeout(() => { clearInterval(interval); resolve(null as unknown as DebugProtocol.SetBreakpointsResponse); }, 12_000);
     });
 
@@ -281,14 +282,14 @@ test('adapter-lib-bp: setBreakpoints for library file probes lib:N (verified=tru
     const bps = resp?.body?.breakpoints as DebugProtocol.Breakpoint[] | undefined;
     log(`lib setBreakpoints response: verified=${bps?.[0]?.verified}`);
 
-    // Key assertion: without the lib:N probing fix, this would be verified=false
+    // Key assertion: without the info libs fix, this would be verified=false
     assert.ok(
         bps?.[0]?.verified === true,
         `Library BP at line ${BP_LIB_LINE} must be verified=true. ` +
-        `verified=false means adapter failed to probe lib:N indices. ` +
+        `verified=false means adapter failed to resolve LibId via info libs. ` +
         `Got: ${JSON.stringify(bps?.[0])}`,
     );
-    log(`✔ lib BP verified=true — adapter successfully probed lib:N`);
+    log(`✔ lib BP verified=true — adapter resolved LibId via info libs`);
 });
 
 test('adapter-lib-bp: continueRequest triggers StoppedEvent at lib BP line 7', async (ctx) => {

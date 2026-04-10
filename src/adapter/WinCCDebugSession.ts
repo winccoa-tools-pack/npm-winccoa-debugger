@@ -170,18 +170,17 @@ export class WinCCDebugSession extends DebugSession {
     private pendingBpRequests = new Map<string, Array<{ bp: Breakpoint; line: number }>>();
 
     /**
-     * Cache of library file basename → WinCC OA lib index used in breakpoint command.
+     * Cache of library file basename → WinCC OA LibId used in breakpoint command.
      *
      * WinCC OA library scripts loaded via `#uses` are compiled into the CTRL
      * manager and do NOT appear in `info scripts`.  To set a breakpoint in them
-     * we probe `breakpoint {scriptId:S, scopeId:0, lib:N, line:L}` for every
-     * scriptId S from `info scripts` and N = 0, 1, … until one succeeds.
-     * Both the scriptId and lib index are cached for subsequent requests.
+     * we call `info libs` to discover the numeric LibId assigned by WinCC OA,
+     * then use `breakpoint {scriptId:-1, scopeId:0, lib:<LibId>, line:L}`.
      *
-     * The lib index corresponds to the 0-based position of the `#uses` directive
-     * in the main script (first `#uses` → lib 0, second → lib 1, etc.).
+     * The LibId is assigned by the CTRL runtime and can be any non-negative
+     * integer (not necessarily sequential).
      */
-    private libIndexCache = new Map<string, { scriptId: number; libIndex: number }>();
+    private libIndexCache = new Map<string, { libId: number; libPath: string }>();
 
     /** All active breakpoints by source path → line numbers. Used to reapply after delete-all. */
     private bpRegistry = new Map<string, number[]>();
@@ -207,9 +206,6 @@ export class WinCCDebugSession extends DebugSession {
 
     /** Prevents concurrent retryPendingBreakpoints executions from the timer and stop-event paths. */
     private pendingBpRetryInFlight = false;
-
-    /** Maximum lib index to probe when searching for a library file. */
-    private static readonly MAX_LIB_PROBE = 8;
 
     constructor() {
         super();
@@ -276,7 +272,7 @@ export class WinCCDebugSession extends DebugSession {
      *
      * WinCC OA CTRL engine breakpoint/step stop format (real protocol):
      *   msg[0] = "line: N"               — line number where execution stopped
-     *   msg[1] = "lib: LibId: -1 ..."    — lib info (may be empty / vary)
+     *   msg[1] = "lib: <id> <path>"      — lib id and path (absent for main script)
      *   msg[2] = "ScriptId: N"           — numeric script ID
      *   msg[3] = "ScopeId: N"            — scope ID (0 for main script)
      *   msg[4] = "ThreadId: N (stopped)" — thread ID and state
@@ -307,10 +303,12 @@ export class WinCCDebugSession extends DebugSession {
                 const scopeMatch = /ScopeId:\s*(\d+)/.exec(scopeEntry);
                 const scopeId = scopeMatch ? parseInt(scopeMatch[1], 10) : 0;
                 const libEntry = msg.find((m) => m.startsWith('lib:')) ?? '';
-                const libIdMatch = /LibId:\s*(-?\d+)/.exec(libEntry);
-                const libId = libIdMatch ? parseInt(libIdMatch[1], 10) : -1;
+                // Format: "lib: <id> <path>" e.g. "lib: 0 /opt/.../libs/debugger_lib.ctl"
+                const libMatch = /^lib:\s*(\d+)\s+(.+)/.exec(libEntry);
+                const libId = libMatch ? parseInt(libMatch[1], 10) : -1;
+                const libPath = libMatch ? libMatch[2].trim() : undefined;
                 this.stopState = { scriptId, threadId, scopeId, ...(libId >= 0 && { libId }) };
-                const libSuffix = libId >= 0 ? `  lib:${libId}` : '';
+                const libSuffix = libId >= 0 ? `  lib:${libId} ${libPath ?? ''}` : '';
                 this.log(
                     `\u23f9 Stopped at line ${lineNum}${libSuffix}  (scriptId=${scriptId} thread=${threadId})`,
                 );
@@ -591,6 +589,39 @@ export class WinCCDebugSession extends DebugSession {
     }
 
     /**
+     * Fetch library information from WinCC OA via `info libs` command and
+     * populate `libIndexCache` with the results.
+     *
+     * WinCC OA `info libs` response format (one entry per line):
+     *   "lib:  63 /full/path/to/libs/CTRLdebugger.ctl"
+     *   "lib: 0 /path/to/project/scripts/libs/debugger_lib.ctl"
+     *
+     * Returns the updated cache for convenience.
+     */
+    private async fetchLibraryMap(
+        client: DatapointClient,
+    ): Promise<Map<string, { libId: number; libPath: string }>> {
+        try {
+            const result = await client.sendCommand('info libs', 3000);
+            for (const line of result) {
+                // Format: "lib: <id> <path>"
+                const m = /^lib:\s*(\d+)\s+(.+)$/.exec(line);
+                if (!m) continue;
+                const libId = parseInt(m[1], 10);
+                const libPath = m[2].trim().replace(/\\/g, '/');
+                const basename = path.basename(libPath).toLowerCase();
+                if (!this.libIndexCache.has(basename)) {
+                    this.libIndexCache.set(basename, { libId, libPath });
+                    this.log(`Library discovered: ${basename} → libId=${libId}`);
+                }
+            }
+        } catch {
+            this.log('info libs command failed — library BPs will retry later');
+        }
+        return this.libIndexCache;
+    }
+
+    /**
      * Delete all WinCC OA breakpoints and re-set every entry in bpRegistry.
      * Eliminates stale/duplicate BPs that accumulate on repeated setBreakpoints calls.
      */
@@ -611,9 +642,9 @@ export class WinCCDebugSession extends DebugSession {
                     if (sid !== -1) {
                         cmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: -1, line })}`;
                     } else {
-                        const cached = this.libIndexCache.get(basename);
-                        if (!cached) continue; // pending — will be retried on next stop
-                        cmd = `breakpoint ${JSON.stringify({ scriptId: cached.scriptId, scopeId: 0, lib: cached.libIndex, line })}`;
+                        const cached = this.libIndexCache.get(basename.toLowerCase());
+                        if (!cached) continue; // pending — will be retried via fetchLibraryMap
+                        cmd = `breakpoint ${JSON.stringify({ scriptId: -1, scopeId: 0, lib: cached.libId, line })}`;
                     }
                     const r = await client.sendCommand(cmd);
                     this.log(
@@ -911,22 +942,11 @@ export class WinCCDebugSession extends DebugSession {
                 }
             }
 
-            // Library files (loaded via #uses) never appear in 'info scripts'.
-            // Probing for the lib index here by issuing a real breakpoint command has a
-            // side-effect: WinCC OA creates the BP, but the subsequent delete-all in
-            // reapplyAllBreakpoints does NOT reliably remove lib-index BPs.  The
-            // reapply then adds the lib BP a second time, producing duplicate BPs that
-            // fire twice per iteration at the calling line.
-            //
-            // Instead, defer library-file BPs to pendingBpRequests.
-            // retryPendingBreakpoints(), called on every stop event, performs the same
-            // probe but uses direct sendCommand (no delete-all + reapply), so only ONE
-            // BP is ever set.  This is safe because there is always at least one
-            // main-script stop (from the other BPs) before the library is entered.
-            //
-            // The only remaining upfront use of findScriptId: distinguish main-script
-            // files (scriptId ≥ 0) from library files (scriptId === -1) for the
-            // reapply path below.
+            // Fetch library map via 'info libs' to populate libIndexCache.
+            // This discovers the real LibId for #uses libraries which never
+            // appear in 'info scripts'.
+            await this.fetchLibraryMap(client);
+
             const scriptId = this.findScriptId(infoResult, scriptBasename);
 
             // delete-all + re-set every registered BP so no stale duplicates remain
@@ -939,7 +959,7 @@ export class WinCCDebugSession extends DebugSession {
             }
 
             const sidFinal = this.findScriptId(infoResult, scriptBasename);
-            const cachedLib = this.libIndexCache.get(scriptBasename);
+            const cachedLib = this.libIndexCache.get(scriptBasename.toLowerCase());
 
             if (sidFinal === -1 && !cachedLib) {
                 // Still unknown — store as pending for retry on next stop event
@@ -1010,6 +1030,9 @@ export class WinCCDebugSession extends DebugSession {
                     return;
                 }
 
+                // Refresh library map so we can resolve lib BPs
+                await this.fetchLibraryMap(client);
+
                 for (const [sourcePath, bpList] of snapshot) {
                     const scriptBasename = path.basename(sourcePath);
                     const scriptId = this.findScriptId(infoResult, scriptBasename);
@@ -1036,41 +1059,18 @@ export class WinCCDebugSession extends DebugSession {
                         continue;
                     }
 
-                    // Not in info scripts — try lib:N probing (for #uses libraries)
+                    // Not in info scripts — check libIndexCache (populated by fetchLibraryMap)
                     if (bpList.length === 0) continue;
-                    let cached = this.libIndexCache.get(scriptBasename);
-                    if (cached === undefined) {
-                        const allIds = this.getAllScriptIds(infoResult);
-                        outer: for (const sid of allIds) {
-                            for (let probe = 0; probe < WinCCDebugSession.MAX_LIB_PROBE; probe++) {
-                                if (!client.isConnected()) break outer;
-                                try {
-                                    const probeCmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: probe, line: bpList[0].line })}`;
-                                    const probeRes = await client.sendCommand(probeCmd, 500);
-                                    if (probeRes[0] === 'breakpoint set') {
-                                        cached = { scriptId: sid, libIndex: probe };
-                                        this.libIndexCache.set(scriptBasename, cached);
-                                        this.log(
-                                            `Pending lib "${scriptBasename}" found at scriptId:${sid} lib:${probe}`,
-                                        );
-                                        break outer;
-                                    }
-                                } catch {
-                                    // probe timed out or errored — try next
-                                }
-                            }
-                        }
-                    }
-                    if (cached === undefined) continue;
+                    const cached = this.libIndexCache.get(scriptBasename.toLowerCase());
+                    if (!cached) continue;
 
-                    // Lib index found — first BP was set via probe; set remaining
-                    const { scriptId: libSid, libIndex } = cached;
+                    // Library found — set all BPs using scriptId:-1 and the real libId
                     this.pendingBpRequests.delete(sourcePath);
-                    bpList[0].bp.verified = true;
-                    this.sendEvent(new BreakpointEvent('changed', bpList[0].bp));
-                    for (let i = 1; i < bpList.length; i++) {
-                        const { bp, line } = bpList[i];
-                        const cmd = `breakpoint ${JSON.stringify({ scriptId: libSid, scopeId: 0, lib: libIndex, line })}`;
+                    this.log(
+                        `Pending lib "${scriptBasename}" resolved via info libs (libId=${cached.libId})`,
+                    );
+                    for (const { bp, line } of bpList) {
+                        const cmd = `breakpoint ${JSON.stringify({ scriptId: -1, scopeId: 0, lib: cached.libId, line })}`;
                         client
                             .sendCommand(cmd)
                             .then((res) => {
@@ -1110,16 +1110,6 @@ export class WinCCDebugSession extends DebugSession {
             }
         }
         return -1;
-    }
-
-    /** Extract all ScriptIds from an 'info scripts' response. */
-    private getAllScriptIds(result: string[]): number[] {
-        const ids: number[] = [];
-        for (const line of result) {
-            const m = /ScriptId:\s*(\d+)/.exec(line);
-            if (m) ids.push(parseInt(m[1], 10));
-        }
-        return ids;
     }
 
     /**
