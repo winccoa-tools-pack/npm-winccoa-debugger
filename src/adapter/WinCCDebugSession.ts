@@ -474,6 +474,25 @@ export class WinCCDebugSession extends DebugSession {
             return { displayVal: `{${len}}`, varRef, namedVariables: len };
         }
 
+        // ── struct (user-defined type): array of {const, name, value} field objects ──
+        if (Array.isArray(rawValue) && type !== 'mapping') {
+            const items = rawValue as Array<Record<string, unknown>>;
+            if (items.length > 0 && typeof items[0].name === 'string') {
+                const children = items.map((field) => {
+                    const fieldName = String(field.name ?? '');
+                    const valObj = field.value as Record<string, unknown> | null | undefined;
+                    if (valObj && typeof valObj === 'object' && !Array.isArray(valObj)) {
+                        const c = this.unwrapValue(valObj);
+                        return new Variable(fieldName, c.displayVal, c.varRef, c.indexedVariables, c.namedVariables);
+                    }
+                    return new Variable(fieldName, this.formatScalar(field.value), 0);
+                });
+                const len = children.length;
+                const varRef = len > 0 ? this.allocVarHandle({ type: 'children', children }) : 0;
+                return { displayVal: `{${len}}`, varRef, namedVariables: len };
+            }
+        }
+
         // ── dyn_* (array of value objects) ───────────────────────────────────
         if (Array.isArray(rawValue)) {
             const arr = rawValue as unknown[];

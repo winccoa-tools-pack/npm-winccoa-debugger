@@ -678,3 +678,63 @@ test('variable-parsing: empty mapping shows "{0}"', async () => {
 
     assert.equal(vars[0].value, '{0}');
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────
+// struct (user-defined type)
+// ─────────────────────────────────────────────────────────────────────────────────
+
+// Confirmed real WinCC OA 3.21 format for struct:
+//   type = user-defined name (e.g. "MyStruct"), varType = 5570560
+//   value = array of {const, name, value} objects (same shape as top-level variables)
+const STRUCT_LINE = '{"const":0,"name":"vst","value":{"type":"MyStruct","varType":5570560,"finalType":"MyStruct","value":[{"const":0,"name":"x","value":{"type":"int","varType":327680,"finalType":"int","value":10}},{"const":0,"name":"label","value":{"type":"string","varType":524288,"finalType":"string","value":"test"}},{"const":0,"name":"active","value":{"type":"bool","varType":262144,"finalType":"bool","value":true}}]}}';
+
+test('variable-parsing: struct — shows field count "{3}", is expandable', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    mock.commandQueue.push([STRUCT_LINE]);
+    const ref = getLocalsRef(session);
+    const vars = await getVariables(session, ref);
+
+    assert.equal(vars.length, 1);
+    assert.equal(vars[0].name, 'vst');
+    assert.equal(vars[0].value, '{3}', 'struct with 3 fields must show "{3}"');
+    assert.ok(vars[0].variablesReference > 0, 'struct must be expandable (variablesReference > 0)');
+    assert.equal(vars[0].namedVariables, 3, 'struct must report 3 namedVariables');
+});
+
+test('variable-parsing: struct children — named fields with correct values', async () => {
+    const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
+    const session = makeSession(mock);
+    await mock.connect();
+    (session as any).client = mock;
+
+    // First request: get the struct variable
+    mock.commandQueue.push([STRUCT_LINE]);
+    const ref = getLocalsRef(session);
+    const vars = await getVariables(session, ref);
+    const vst = vars[0];
+
+    // Second request: expand struct children
+    session.sentResponses = [];
+    const children = await getVariables(session, vst.variablesReference);
+    assert.equal(children.length, 3);
+
+    const x      = children.find((c) => c.name === 'x');
+    const label  = children.find((c) => c.name === 'label');
+    const active = children.find((c) => c.name === 'active');
+
+    assert.ok(x,      '"x" field must be present in struct children');
+    assert.equal(x!.value, '10',      'int field x must display "10"');
+    assert.equal(x!.variablesReference, 0, 'scalar field must not be expandable');
+
+    assert.ok(label,  '"label" field must be present in struct children');
+    assert.equal(label!.value, '"test"', 'string field label must be quoted');
+    assert.equal(label!.variablesReference, 0);
+
+    assert.ok(active, '"active" field must be present in struct children');
+    assert.equal(active!.value, 'true',  'bool field active must display "true"');
+    assert.equal(active!.variablesReference, 0);
+});
