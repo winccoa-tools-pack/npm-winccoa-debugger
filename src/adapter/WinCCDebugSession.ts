@@ -147,6 +147,14 @@ export class WinCCDebugSession extends DebugSession {
     private stopOnEntryPending = false;
 
     /**
+     * Set to the expected stop reason when a step or pause command is in flight.
+     * The spurious-stop filter is bypassed while this is set, so that step/pause
+     * results (which stop at non-BP lines) are forwarded to VS Code.
+     * Cleared as soon as the next stop event is received.
+     */
+    private pendingStopReason: 'step' | 'pause' | null = null;
+
+    /**
      * Breakpoints that could not be set during the initial setBreakpoints call
      * because the source file was not yet listed in 'info scripts'.
      *
@@ -306,6 +314,18 @@ export class WinCCDebugSession extends DebugSession {
                 this.log(
                     `\u23f9 Stopped at line ${lineNum}${libSuffix}  (scriptId=${scriptId} thread=${threadId})`,
                 );
+                // If a step or pause command is in flight, bypass the spurious-stop
+                // filter: the runtime stopped at a non-BP line as the direct result of
+                // the user's action, so we must forward the event to VS Code.
+                const pendingReason = this.pendingStopReason;
+                this.pendingStopReason = null;
+                if (pendingReason) {
+                    if (!this.stopOnEntryPending) {
+                        this.sendEvent(new StoppedEvent(pendingReason, threadId));
+                    }
+                    this.retryPendingBreakpoints();
+                    return;
+                }
                 // Spurious stop filter: if the stopped line has no registered BP in our
                 // registry (e.g. WinCC OA fired a queued stop for a just-removed BP),
                 // auto-continue without emitting a StoppedEvent.
@@ -1130,7 +1150,7 @@ export class WinCCDebugSession extends DebugSession {
 
     /**
      * Step over (next line, do not enter function calls).
-     * WinCC OA command: "next"  (GDB-style naming)
+     * WinCC OA command: "step over"  (from CTRLdebugger.ctl constants)
      *
      * Send response first (same reasoning as continueRequest) so VS Code
      * transitions to RUNNING before the resulting StoppedEvent arrives.
@@ -1142,15 +1162,19 @@ export class WinCCDebugSession extends DebugSession {
         this.log('→ Step Over');
         this.sendResponse(response);
         if (this.client?.isConnected()) {
+            this.pendingStopReason = 'step';
             this.attachToStopContext(this.client)
-                .catch(() => {})
-                .then(() => this.client?.sendCommand('next').catch(() => {}));
+                .catch((e: Error) => { this.log(`attachToStopContext error: ${e.message}`); })
+                .then(() => {
+                    return this.client?.sendCommand('step over')
+                        .catch((e: Error) => { this.log(`step over error: ${e.message}`); });
+                });
         }
     }
 
     /**
      * Step into function call.
-     * WinCC OA command: "step"  (GDB-style naming)
+     * WinCC OA command: "step in"  (from CTRLdebugger.ctl constants)
      *
      * Send response first so VS Code is in RUNNING state when StoppedEvent arrives.
      */
@@ -1161,15 +1185,19 @@ export class WinCCDebugSession extends DebugSession {
         this.log('↓ Step Into');
         this.sendResponse(response);
         if (this.client?.isConnected()) {
+            this.pendingStopReason = 'step';
             this.attachToStopContext(this.client)
-                .catch(() => {})
-                .then(() => this.client?.sendCommand('step').catch(() => {}));
+                .catch((e: Error) => { this.log(`attachToStopContext error: ${e.message}`); })
+                .then(() => {
+                    return this.client?.sendCommand('step in')
+                        .catch((e: Error) => { this.log(`step in error: ${e.message}`); });
+                });
         }
     }
 
     /**
      * Step out of current function.
-     * WinCC OA command: "finish"  (GDB-style naming)
+     * WinCC OA command: "step out"  (from CTRLdebugger.ctl constants)
      *
      * Send response first so VS Code is in RUNNING state when StoppedEvent arrives.
      */
@@ -1180,15 +1208,21 @@ export class WinCCDebugSession extends DebugSession {
         this.log('↑ Step Out');
         this.sendResponse(response);
         if (this.client?.isConnected()) {
+            this.pendingStopReason = 'step';
             this.attachToStopContext(this.client)
-                .catch(() => {})
-                .then(() => this.client?.sendCommand('finish').catch(() => {}));
+                .catch((e: Error) => { this.log(`attachToStopContext error: ${e.message}`); })
+                .then(() => {
+                    return this.client?.sendCommand('step out')
+                        .catch((e: Error) => { this.log(`step out error: ${e.message}`); });
+                });
         }
     }
 
     /**
      * Pause (break) execution.
      * WinCC OA command: "b" (break/pause)
+     * Requires context (script + thread) to be set first so WinCC OA knows
+     * which script to pause.  Re-uses the stop context from the last stop event.
      */
     protected pauseRequest(
         response: DebugProtocol.PauseResponse,
@@ -1197,6 +1231,10 @@ export class WinCCDebugSession extends DebugSession {
         this.log('⏸ Pause');
         const work = async () => {
             if (this.client?.isConnected()) {
+                this.pendingStopReason = 'pause';
+                // Set script/thread context before issuing "b" so WinCC OA knows
+                // which running script to pause (requires context from last stop).
+                await this.attachToStopContext(this.client).catch(() => {});
                 // "b" = break/pause. WinCC OA responds with the stop event data
                 // (["line: N", ...]) using this command's ID.  DatapointClient
                 // will re-emit it as 'message' → handleUnsolicitedMessage → StoppedEvent.

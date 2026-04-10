@@ -162,8 +162,25 @@ export class DatapointClient extends EventEmitter {
      * we must NOT re-emit those as 'message' events — doing so sends a
      * spurious StoppedEvent to VS Code for every stackTrace/variables
      * request, which is the root cause of the "3 Continue presses" bug.
+     *
+     * WinCC OA 3.21 correct command names (from CTRLdebugger.ctl):
+     *   cont / c  — continue execution
+     *   step in   — step into function
+     *   step out  — step out of function
+     *   step over — step over (next line)
+     *   b / break — pause / break execution
      */
-    private static readonly EXEC_CMD_RE = /^(cont|next|step|finish|b)\b/;
+    private static readonly EXEC_CMD_RE = /^(cont|c|step in|step out|step over|b|break)/;
+
+    /**
+     * Step commands that use a two-phase response protocol:
+     *   Phase 1: WinCC OA returns [id, "OK"] to acknowledge receipt.
+     *   Phase 2: WinCC OA returns [id, "line: N", ...] with the new stop position.
+     *
+     * Both phases carry the SAME command ID.  We must NOT resolve/delete the
+     * pending entry on phase 1 — keep it alive until phase 2 ("line:") arrives.
+     */
+    private static readonly STEP_CMD_RE = /^(step in|step out|step over)/;
 
     /**
      * @param config - Connection configuration
@@ -367,7 +384,8 @@ export class DatapointClient extends EventEmitter {
             await this.api.dpSetWait(commandDpe, payload);
 
             // Wait for response
-            return await responsePromise;
+            const result = await responsePromise;
+            return result;
         } catch (err) {
             this.pendingCommands.delete(id);
             throw err;
@@ -393,17 +411,28 @@ export class DatapointClient extends EventEmitter {
             // Find pending command
             const pending = this.pendingCommands.get(id);
             if (pending) {
+                const isStepCmd = DatapointClient.STEP_CMD_RE.test(pending.cmd);
+                const isStopData = result[0]?.startsWith('line: ');
+
+                // Step commands (step in/out/over) use a TWO-PHASE response protocol:
+                //   Phase 1: [id, "OK"]          — acknowledgment, keep pending alive
+                //   Phase 2: [id, "line: N", ...] — actual stop position, resolve
+                // Do NOT resolve/delete the pending on phase 1; wait for phase 2.
+                if (isStepCmd && !isStopData && result[0] === 'OK') {
+                    return;
+                }
+
                 clearTimeout(pending.timeout);
                 this.pendingCommands.delete(id);
-                // WinCC OA 3.21 prepends the last command's ID to stop events even
-                // though they are unsolicited (e.g. breakpoint hit during "b" pause).
-                // Only re-emit as 'message' for execution commands (cont, next, step,
-                // finish, b). Context-selection commands like "script N" / "thread N"
-                // can ALSO return stop-format data but must NOT trigger StoppedEvent —
+                // WinCC OA 3.21 prepends the command's ID to the stop-data response
+                // for execution commands (step in/out/over, cont, b).  Re-emit as
+                // 'message' so WinCCDebugSession handles it as a StoppedEvent.
+                // Context-selection commands like "script N" / "thread N" can also
+                // return stop-format data but must NOT trigger StoppedEvent —
                 // that would cause spurious extra stops on every stackTrace request.
                 if (
                     DatapointClient.EXEC_CMD_RE.test(pending.cmd) &&
-                    result[0]?.startsWith('line: ')
+                    isStopData
                 ) {
                     this.emit('message', result);
                 }
