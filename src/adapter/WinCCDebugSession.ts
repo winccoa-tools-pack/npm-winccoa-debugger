@@ -253,6 +253,18 @@ export class WinCCDebugSession extends DebugSession {
     /** Map a WinCC OA remote path back to the VS Code local path */
     private toVSCodePath(wccoaPath: string): string {
         const isAbsolute = wccoaPath.startsWith('/') || /^[A-Za-z]:[/\\]/.test(wccoaPath);
+
+        // WinCC OA bt returns bare filenames for library files (e.g. "debugger_lib.ctl"
+        // instead of the full path).  Use the cached info libs path which contains the
+        // correct absolute path including the libs/ subdirectory.
+        if (!isAbsolute) {
+            const basename = path.basename(wccoaPath).toLowerCase();
+            const cached = this.libIndexCache.get(basename);
+            if (cached) {
+                return cached.libPath;
+            }
+        }
+
         for (const [local, remote] of Object.entries(this.pathMappings)) {
             if (remote === '') {
                 // Empty remote means OA scripts are addressed with bare filenames.
@@ -1279,7 +1291,9 @@ export class WinCCDebugSession extends DebugSession {
             try {
                 await this.attachToStopContext(this.client);
                 const result = await this.client.sendCommand('bt', 3000);
+                this.log(`bt raw response: ${JSON.stringify(result)}`);
                 const frames = this.parseStackFrames(result);
+                this.log(`bt parsed frames: ${frames.map((f) => `${f.name} @ ${f.source?.path}:${f.line}`).join(' | ')}`);
                 response.body = { stackFrames: frames, totalFrames: frames.length };
             } catch {
                 response.body = { stackFrames: [], totalFrames: 0 };
