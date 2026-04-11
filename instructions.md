@@ -11,8 +11,9 @@ Datapoints (`_CtrlDebug_CTRL_N._CtrlDebug.Command/Result`).
 
 > **Stand: April 2026**  
 > Unit-Tests: ✅ vollständig grün (`npm run test:unit`)  
-> Integration-Tests: Im VS Code Extension-Host (`vscode-winccoa-debugger` Repo, `npm run test:e2e:*`)  
-> Aktiv offen: Library-BP feuert nicht (Details in Known Issues)
+> Integration-Tests: Im VS Code Extension-Host (`vscode-winccoa-debugger` Repo)  
+> Library-BP + Class-Debugging: ✅ gelöst  
+> Aktiv offen: siehe **Offene Features / Findings**
 
 ---
 
@@ -247,42 +248,50 @@ Setup-Befehl im Extension-Repo: `npm run setup:e2e-links`
 
 ## Bekannte Probleme / Offene Punkte
 
-### ❌ 1. Library-BP feuert nicht (AKTIV)
+### ✅ 1. Library-BP (gelöst)
 
-**Betroffene Tests**: `debugger-library-bp-e2e.test.ts`  
-**Symptom**: Events: `initialized, continued, breakpoint` — aber kein `stopped` innerhalb 20s  
-**Was passiert**:
-- `retryPendingBreakpoints()` via 500ms-Timer findet `scriptId/libIndex` via Probe
-- Erhält `breakpoint set` → `BreakpointEvent` an VS Code (BP verified)
-- WinCC OA feuert den BP **nicht**
-
-**Vermutung**: Probe findet `lib:0`, aber die Library liegt bei einem anderen Index —
-oder `breakpoint set` ist ein False-Positive für ungültige lib-Indizes.  
-**Nächster Schritt**: `info scripts`-Antwort bei laufendem `call_library_function.ctl`
-analysieren — welche libIds erscheinen, und stimmen sie mit dem Probe-Ergebnis überein?
+`toVSCodePath` prüft `libIndexCache` für bare Filenames — Library-BPs feuern korrekt.
 
 ### ⚠️ 2. Race: info scripts leer bei frischem Manager-Start (teilweise gelöst)
 
-**Symptom**: Kurz nach `startManager` ist `info scripts` noch leer → BPs pending.  
-**Status**: 500ms-Retry-Timer löst es meistens (nach 1–3 Retries). Noch inkonsistent bei
-sehr frischem Start (< 500ms bis erste BP-Anfrage).
+500ms-Retry-Timer löst es meistens. Noch inkonsistent bei < 500ms bis erste BP-Anfrage.
 
 ### ✅ 3. Race Condition bei concurrent setBreakpoints (gelöst)
 
-`bpOperationQueue` serialisiert alle BP-Set-Operationen. Kein Duplikat-Problem.
+`bpOperationQueue` serialisiert alle BP-Set-Operationen.
 
-### ✅ 4. Two-Phase-Response für Step-Commands (gelöst)
+### ✅ 4. Two-Phase-Response (gelöst)
 
-`STEP_CMD_RE` + Phase-1-Guard — Phase 1 "OK" resolvet den Pending-Entry nicht.
+`STEP_CMD_RE` + Phase-1-Guard.
 
 ### ✅ 5. WinCC OA 3.21 Command-Namen (gelöst)
 
 Korrekte Commands: `step over` / `step in` / `step out` / `b` / `c`.
 
-### ✅ 6. Pause ohne Kontext schlägt fehl (gelöst)
+### ✅ 6. Pause ohne Kontext (gelöst)
 
-`attachToStopContext()` vor `b`; `stopState` bleibt nach Continue erhalten.
-DebugBreak()-Pattern etabliert `stopState` zuverlässig beim Start.
+`attachToStopContext()` vor `b`; DebugBreak()-Pattern etabliert `stopState`.
+
+---
+
+## Offene Features / Findings
+
+### Nicht implementiert
+
+- **Conditional Breakpoints** — Interface-Stubs vorhanden, `WinCCDebugSession` ignoriert Conditions
+- **Hit-Count / Logpoint / Function / Exception / Data Breakpoints** — nicht implementiert
+- **Globals Scope** — `info globals` Command existiert im Encoder, nicht in `scopesRequest` verdrahtet
+- **Set Variable** — `supportsSetVariable = false`
+- **Modules / Loaded Sources** — nicht implementiert
+- **Completions (REPL)** — nicht implementiert
+- **Multi-Thread Debugging** — Adapter nimmt Single-Thread an
+- **Reverse Stepping / Step-In-Targets** — nicht implementiert
+
+### Adapter-Refactoring
+
+- `BreakpointManager.ts`, `ThreadManager.ts`, `VariableManager.ts` sind leere Skelette
+- Gesamte Logik lebt in `WinCCDebugSession.ts` — sollte in Manager-Klassen aufgeteilt werden
+- `ResponseParser.ts` hat viele TODO-Stubs
 
 ---
 
