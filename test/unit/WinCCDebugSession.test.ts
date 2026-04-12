@@ -288,7 +288,7 @@ test('WinCCDebugSession: continueRequest sends "cont" command', async () => {
     );
 });
 
-test('WinCCDebugSession: nextRequest sends "next" command (GDB step-over)', async () => {
+test('WinCCDebugSession: nextRequest sends "step over" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -298,11 +298,11 @@ test('WinCCDebugSession: nextRequest sends "next" command (GDB step-over)', asyn
     session.nextRequest(response, { threadId: 1, granularity: 'statement' });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('next'));
+    assert.ok(mock.commands.includes('step over'));
     assert.equal(session.sentResponses.length, 1);
 });
 
-test('WinCCDebugSession: stepInRequest sends "step" command (GDB step-into)', async () => {
+test('WinCCDebugSession: stepInRequest sends "step in" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -312,11 +312,11 @@ test('WinCCDebugSession: stepInRequest sends "step" command (GDB step-into)', as
     session.stepInRequest(response, { threadId: 1, granularity: 'statement' });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('step'));
+    assert.ok(mock.commands.includes('step in'));
     assert.equal(session.sentResponses.length, 1);
 });
 
-test('WinCCDebugSession: stepOutRequest sends "finish" command (GDB step-out)', async () => {
+test('WinCCDebugSession: stepOutRequest sends "step out" command', async () => {
     const mock = new MockDatapointClient(defaultAttachArgs as unknown as DatapointConfig);
     const session = makeSession(mock);
     await mock.connect();
@@ -326,7 +326,7 @@ test('WinCCDebugSession: stepOutRequest sends "finish" command (GDB step-out)', 
     session.stepOutRequest(response, { threadId: 1, granularity: 'statement' });
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(mock.commands.includes('finish'));
+    assert.ok(mock.commands.includes('step out'));
     assert.equal(session.sentResponses.length, 1);
 });
 

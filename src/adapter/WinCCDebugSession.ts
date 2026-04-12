@@ -319,10 +319,11 @@ export class WinCCDebugSession extends DebugSession {
                 const scopeMatch = /ScopeId:\s*(\d+)/.exec(scopeEntry);
                 const scopeId = scopeMatch ? parseInt(scopeMatch[1], 10) : 0;
                 const libEntry = msg.find((m) => m.startsWith('lib:')) ?? '';
-                // Format: "lib: <id> <path>" e.g. "lib: 0 /opt/.../libs/debugger_lib.ctl"
-                const libMatch = /^lib:\s*(\d+)\s+(.+)/.exec(libEntry);
+                // Stop events: "lib: LibId: 2" or "lib: LibId: -1"
+                // Info libs:   "lib: 0 /opt/.../libs/debugger_lib.ctl"
+                const libMatch = /^lib:\s*(?:LibId:\s*)?(-?\d+)(?:\s+(.+))?/.exec(libEntry);
                 const libId = libMatch ? parseInt(libMatch[1], 10) : -1;
-                const libPath = libMatch ? libMatch[2].trim() : undefined;
+                const libPath = libMatch?.[2]?.trim();
                 this.stopState = { scriptId, threadId, scopeId, ...(libId >= 0 && { libId }) };
                 const libSuffix = libId >= 0 ? `  lib:${libId} ${libPath ?? ''}` : '';
                 this.log(
@@ -653,16 +654,16 @@ export class WinCCDebugSession extends DebugSession {
     ): Promise<void> {
         await client.sendCommand('delete-all');
 
-        // Set main-script BPs and collect the main scriptId.
-        // Library BPs (#uses) are NOT set here — WinCC OA requires them to be
-        // set after the first real stop at a main-script BP (not during the
-        // initial DebugBreak pause).  They are handled by retryPendingBreakpoints()
-        // which fires on each stop event.
+        // Collect the main scriptId so we can reference it for library BPs.
+        let mainScriptId = -1;
+
         for (const [filePath, lines] of this.bpRegistry) {
             const basename = path.basename(filePath);
             const sid = this.findScriptId(infoResult, basename);
             if (sid !== -1) {
+                // Main script (or any script visible in 'info scripts')
                 this.scriptIdToPath.set(sid, filePath);
+                if (mainScriptId < 0) mainScriptId = sid;
                 for (const line of lines) {
                     try {
                         const cmd = `breakpoint ${JSON.stringify({ scriptId: sid, scopeId: 0, lib: -1, line })}`;
@@ -672,6 +673,28 @@ export class WinCCDebugSession extends DebugSession {
                         );
                     } catch {
                         // ignore — will surface as FAILED on next reapply
+                    }
+                }
+                continue;
+            }
+
+            // Library file — check if we already know its libId from info libs.
+            // During the initial DebugBreak pause, info libs may be empty and
+            // libraries will be deferred to retryPendingBreakpoints().  But once
+            // the libIndexCache has been populated (after the first real stop),
+            // we must re-set library BPs here too — otherwise delete-all above
+            // wipes them and they stay grayed out.
+            const cached = this.libIndexCache.get(basename.toLowerCase());
+            if (cached && mainScriptId >= 0) {
+                for (const line of lines) {
+                    try {
+                        const cmd = `breakpoint ${JSON.stringify({ scriptId: mainScriptId, scopeId: 0, lib: cached.libId, line })}`;
+                        const r = await client.sendCommand(cmd);
+                        this.log(
+                            `\u25cf Lib BP ${r[0] === 'breakpoint set' ? 'set' : 'FAILED'}: ${basename}:${line} (lib:${cached.libId})`,
+                        );
+                    } catch {
+                        // ignore
                     }
                 }
             }
@@ -982,9 +1005,24 @@ export class WinCCDebugSession extends DebugSession {
             const sidFinal = this.findScriptId(infoResult, scriptBasename);
 
             if (sidFinal === -1) {
-                // Library or unknown script — store as pending.
-                // Library BPs (#uses) can only be set after the first real stop
-                // at a main-script BP, so retryPendingBreakpoints() will handle them.
+                // Not in info scripts — check if it's a known library.
+                // If the libIndexCache already has this file (populated by a
+                // previous fetchLibraryMap / stop event), the BPs were already
+                // set by reapplyAllBreakpoints above and can be reported as
+                // verified immediately.  Otherwise store as pending for
+                // retryPendingBreakpoints() to handle after the first real stop.
+                const cached = this.libIndexCache.get(scriptBasename.toLowerCase());
+                if (cached) {
+                    // Library BPs were set by reapplyAllBreakpoints — report verified
+                    this.log(`Library "${scriptBasename}" known (libId=${cached.libId}) — BPs verified`);
+                    this.pendingBpRequests.delete(sourcePath);
+                    response.body = {
+                        breakpoints: requestedBps.map((bp) => new Breakpoint(true, bp.line)),
+                    };
+                    this.sendResponse(response);
+                    return;
+                }
+
                 this.log(`Script "${scriptBasename}" not in info scripts — storing as pending (library?)`);
                 const bps = requestedBps.map((bp) => {
                     const b = new Breakpoint(false, bp.line);
