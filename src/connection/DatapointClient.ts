@@ -30,6 +30,7 @@
 
 import { EventEmitter } from 'events';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import {
     getWinCCOAInstallationPathByVersion,
     getAvailableWinCCOAVersions,
@@ -246,7 +247,8 @@ export class DatapointClient extends EventEmitter {
                 // Load the official Siemens winccoa-manager package.
                 // Requires WinCC OA args to be present in process.argv (see above).
                 const managerPath = this.resolveManagerPath();
-                const mod = (await import(managerPath)) as
+                const managerUrl = pathToFileURL(managerPath).href;
+                const mod = (await import(/* webpackIgnore: true */ managerUrl)) as
                     | { WinccoaManager: new () => IWinccoaManager }
                     | { default: { WinccoaManager: new () => IWinccoaManager } };
                 const { WinccoaManager } = 'default' in mod ? mod.default : mod;
@@ -267,10 +269,11 @@ export class DatapointClient extends EventEmitter {
                     'lib',
                     'connection-binding.js',
                 );
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { ConnectionBinding } = require(connBindingPath) as {
-                    ConnectionBinding: { instance: { start(): boolean } };
-                };
+                const connBindingUrl = pathToFileURL(connBindingPath).href;
+                const connMod = (await import(/* webpackIgnore: true */ connBindingUrl)) as
+                    | { ConnectionBinding: { instance: { start(): boolean } } }
+                    | { default: { ConnectionBinding: { instance: { start(): boolean } } } };
+                const { ConnectionBinding } = 'default' in connMod ? connMod.default : connMod;
                 ConnectionBinding.instance.start();
 
                 // Authenticate so we are allowed to write to system DPs like
