@@ -117,6 +117,14 @@ interface VarHandleInfo {
     children?: Variable[];
 }
 
+/**
+ * Hardcoded internal debug flag for development.
+ * When true, adapter writes diagnostic messages to process.stderr
+ * (which ends up in the WinCC OA node manager log file).
+ * Keep false in production to avoid polluting WinCC OA logs.
+ */
+const INTERNAL_DEBUG = false;
+
 export class WinCCDebugSession extends DebugSession {
     private client: DatapointClient | null = null;
     private trace: boolean = false;
@@ -220,14 +228,14 @@ export class WinCCDebugSession extends DebugSession {
     // =========================================================================
 
     /**
-     * Always log to stderr — visible in VS Code's "Debug Output" panel.
-     * Also send as OutputEvent to the Debug Console if trace is enabled.
+     * Log to the VS Code Debug Console via OutputEvent.
+     * When INTERNAL_DEBUG is enabled, also writes to stderr (WinCC OA node log).
      */
     private log(msg: string): void {
-        process.stderr.write(`[winccoa-debug] ${msg}\n`);
-        if (this.trace) {
-            this.sendEvent(new OutputEvent(`[winccoa-debug] ${msg}\n`, 'console'));
+        if (INTERNAL_DEBUG) {
+            process.stderr.write(`[winccoa-debug] ${msg}\n`);
         }
+        this.sendEvent(new OutputEvent(`[winccoa-debug] ${msg}\n`, 'console'));
     }
 
     private allocVarHandle(info: VarHandleInfo): number {

@@ -142,6 +142,14 @@ export interface DebugCommand {
 }
 
 export class DatapointClient extends EventEmitter {
+    /**
+     * Hardcoded internal debug flag for development.
+     * When true, DatapointClient writes diagnostic messages to process.stderr
+     * (which ends up in the WinCC OA node manager log file).
+     * Keep false in production to avoid polluting WinCC OA logs.
+     */
+    static readonly INTERNAL_DEBUG = false;
+
     private config: DatapointConfig;
     private connected = false;
     private debugDp = '';
@@ -274,9 +282,11 @@ export class DatapointClient extends EventEmitter {
                 try {
                     (this.api as any).setUserId(1);
                 } catch (e) {
-                    process.stderr.write(
-                        `[DatapointClient] setUserId(1) failed: ${(e as Error).message} — continuing anyway\n`,
-                    );
+                    if (DatapointClient.INTERNAL_DEBUG) {
+                        process.stderr.write(
+                            `[DatapointClient] setUserId(1) failed: ${(e as Error).message} — continuing anyway\n`,
+                        );
+                    }
                 }
             }
 
@@ -316,9 +326,11 @@ export class DatapointClient extends EventEmitter {
                     this.config.answerOnConnect ?? false,
                 );
                 if (this.resultSubscriptionId < 0) {
-                    process.stderr.write(
-                        `[DatapointClient] dpConnect attempt ${dpConnectAttempts} failed for "${resultDpe}" — retrying in 500 ms…\n`,
-                    );
+                    if (DatapointClient.INTERNAL_DEBUG) {
+                        process.stderr.write(
+                            `[DatapointClient] dpConnect attempt ${dpConnectAttempts} failed for "${resultDpe}" — retrying in 500 ms…\n`,
+                        );
+                    }
                     await new Promise<void>((r) => setTimeout(r, 500));
                 }
             }
@@ -539,15 +551,19 @@ export class DatapointClient extends EventEmitter {
 
         if (this.api.dpExists(this.debugDp)) return;
 
-        process.stderr.write(
-            `[DatapointClient] Debug DP "${this.debugDp}" does not exist — creating…\n`,
-        );
+        if (DatapointClient.INTERNAL_DEBUG) {
+            process.stderr.write(
+                `[DatapointClient] Debug DP "${this.debugDp}" does not exist — creating…\n`,
+            );
+        }
 
         await this.api.dpCreate(this.debugDp, DatapointClient.DEBUG_DP_TYPE);
 
-        process.stderr.write(
-            `[DatapointClient] Debug DP "${this.debugDp}" created successfully.\n`,
-        );
+        if (DatapointClient.INTERNAL_DEBUG) {
+            process.stderr.write(
+                `[DatapointClient] Debug DP "${this.debugDp}" created successfully.\n`,
+            );
+        }
     }
 
     /**
