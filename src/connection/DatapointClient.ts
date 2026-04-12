@@ -58,6 +58,10 @@ export interface IWinccoaManager {
     dpSet(dpeNames: string | string[], values: any | any[]): void;
     /** Write and wait until the value is confirmed by the Data Manager. */
     dpSetWait(dpeNames: string | string[], values: any | any[]): Promise<void>;
+    /** Check whether a datapoint exists. */
+    dpExists(dpName: string): boolean;
+    /** Create a new datapoint of the given type. Returns true on success. */
+    dpCreate(dpName: string, dpType: string): Promise<boolean>;
     /**
      * Set the active user for this manager instance.
      * No password needed when the OS process runs as root.
@@ -154,6 +158,13 @@ export class DatapointClient extends EventEmitter {
             timeout: NodeJS.Timeout;
         }
     >();
+
+    /**
+     * WinCC OA datapoint type for CTRL debug datapoints.
+     * All `_CtrlDebug_CTRL_N` / `_CtrlDebug_UI_N` / … DPs share this DPT.
+     * The DPT defines two elements: `.Command` (Text) and `.Result` (dyn_string).
+     */
+    private static readonly DEBUG_DP_TYPE = '_CtrlDebug';
 
     /**
      * Execution commands that may legitimately return a stop notification
@@ -269,6 +280,11 @@ export class DatapointClient extends EventEmitter {
                     );
                 }
             }
+
+            // Ensure the debug DP exists — auto-create if missing.
+            // WinCC OA pre-creates _CtrlDebug_CTRL_1 through _9 during project
+            // setup, but DPs for manager numbers ≥10 must be created on the fly.
+            await this.ensureDebugDpExists();
 
             // Subscribe to the Result DPE to receive debugger responses.
             // Official API: dpConnect(callback, dpeNames) — callback comes FIRST.
@@ -512,6 +528,30 @@ export class DatapointClient extends EventEmitter {
     private buildDpe(element: 'Result' | 'Command'): string {
         const base = `${this.debugDp}.${element}`;
         return this.config.system ? `${this.config.system}:${base}` : base;
+    }
+
+    /**
+     * Ensure the debug datapoint exists, creating it if necessary.
+     *
+     * WinCC OA only pre-creates `_CtrlDebug_CTRL_1` through `_9` during
+     * project initialisation.  When the adapter targets a manager number
+     * ≥10 (or any other number whose DP is missing), this method creates
+     * the DP with the standard `_CtrlDebug` DPT so dpConnect can succeed.
+     */
+    private async ensureDebugDpExists(): Promise<void> {
+        if (!this.api) return;
+
+        if (this.api.dpExists(this.debugDp)) return;
+
+        process.stderr.write(
+            `[DatapointClient] Debug DP "${this.debugDp}" does not exist — creating…\n`,
+        );
+
+        await this.api.dpCreate(this.debugDp, DatapointClient.DEBUG_DP_TYPE);
+
+        process.stderr.write(
+            `[DatapointClient] Debug DP "${this.debugDp}" created successfully.\n`,
+        );
     }
 
     /**

@@ -13,6 +13,14 @@ class MockWinccoaManager implements IWinccoaManager {
     private nextSubId = 1;
     /** Track the `answer` flag passed to the most recent dpConnect call */
     public lastDpConnectAnswer: boolean | undefined = undefined;
+    /** Set of DP names that "exist" in the mock. Pre-populated with _CtrlDebug_CTRL_1..9. */
+    public existingDps = new Set<string>([
+        '_CtrlDebug_CTRL_1', '_CtrlDebug_CTRL_2', '_CtrlDebug_CTRL_3',
+        '_CtrlDebug_CTRL_4', '_CtrlDebug_CTRL_5', '_CtrlDebug_CTRL_6',
+        '_CtrlDebug_CTRL_7', '_CtrlDebug_CTRL_8', '_CtrlDebug_CTRL_9',
+    ]);
+    /** Track dpCreate calls: [dpName, dpType][] */
+    public createdDps: Array<{ dpName: string; dpType: string }> = [];
 
     /** Official API: callback is FIRST param, returns subscription id */
     dpConnect(callback: (names: string[], values: any[], type?: any, error?: any) => void, dpeNames: string | string[], answer?: boolean): number {
@@ -36,6 +44,16 @@ class MockWinccoaManager implements IWinccoaManager {
 
     async dpSetWait(dpeNames: string | string[], values: any | any[]): Promise<void> {
         this.dpSet(dpeNames, values);
+    }
+
+    dpExists(dpName: string): boolean {
+        return this.existingDps.has(dpName);
+    }
+
+    async dpCreate(dpName: string, dpType: string): Promise<boolean> {
+        this.createdDps.push({ dpName, dpType });
+        this.existingDps.add(dpName);
+        return true;
     }
 
     /** Test helper: simulate a DPE value change for subscribers on the given DPE */
@@ -405,4 +423,65 @@ test('DatapointClient: context commands (script N, thread N) do NOT emit "messag
             `"${contextCmd}" must NOT emit 'message' even if WinCC OA returns stop-format data`,
         );
     }
+});
+
+// ---------------------------------------------------------------------------
+// Auto-create debug DP tests
+// ---------------------------------------------------------------------------
+
+test('DatapointClient: connect skips dpCreate when DP already exists (manager 1–9)', async () => {
+    const { client, api } = makeConnectedClient({ managerNumber: 5 });
+    await client.connect();
+
+    assert.ok(client.isConnected());
+    assert.equal(api.createdDps.length, 0, 'dpCreate must NOT be called for an existing DP');
+});
+
+test('DatapointClient: connect auto-creates DP for manager number ≥10', async () => {
+    const { client, api } = makeConnectedClient({ managerNumber: 10 });
+    // _CtrlDebug_CTRL_10 is NOT in the default existingDps set
+    await client.connect();
+
+    assert.ok(client.isConnected());
+    assert.equal(api.createdDps.length, 1, 'dpCreate must be called once');
+    assert.equal(api.createdDps[0]!.dpName, '_CtrlDebug_CTRL_10');
+    assert.equal(api.createdDps[0]!.dpType, '_CtrlDebug');
+});
+
+test('DatapointClient: connect auto-creates DP for manager number 98 (Quick Debug)', async () => {
+    const { client, api } = makeConnectedClient({ managerNumber: 98 });
+    await client.connect();
+
+    assert.ok(client.isConnected());
+    assert.equal(api.createdDps.length, 1);
+    assert.equal(api.createdDps[0]!.dpName, '_CtrlDebug_CTRL_98');
+    assert.equal(api.createdDps[0]!.dpType, '_CtrlDebug');
+});
+
+test('DatapointClient: auto-created DP is usable for dpConnect', async () => {
+    const { client, api } = makeConnectedClient({ managerNumber: 11 });
+    await client.connect();
+
+    assert.ok(client.isConnected());
+    // After dpCreate, dpConnect should succeed on the Result DPE
+    const resultDpe = 'System1:_CtrlDebug_CTRL_11.Result';
+    // Simulate a response — no crash
+    api.simulateValue(resultDpe, ['test-id', 'OK']);
+    assert.ok(true, 'dpConnect succeeded on auto-created DP');
+});
+
+test('DatapointClient: dpCreate failure propagates as connect error', async () => {
+    const { client, api } = makeConnectedClient({ managerNumber: 20 });
+    // Override dpCreate to throw
+    api.dpCreate = async () => { throw new Error('dpCreate failed: insufficient permissions'); };
+
+    let threw = false;
+    try {
+        await client.connect();
+    } catch (err) {
+        threw = true;
+        assert.match((err as Error).message, /dpCreate failed/);
+    }
+    assert.ok(threw, 'connect() must throw when dpCreate fails');
+    assert.ok(!client.isConnected());
 });
