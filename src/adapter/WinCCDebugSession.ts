@@ -239,10 +239,16 @@ export class WinCCDebugSession extends DebugSession {
     /** Map a VS Code local path to the WinCC OA remote path */
     private toWinCCOAPath(vscodePath: string): string {
         for (const [local, remote] of Object.entries(this.pathMappings)) {
-            if (vscodePath.startsWith(local)) {
+            const normalizedLocal = path.normalize(local);
+            const normalizedPath = path.normalize(vscodePath);
+            if (normalizedPath.startsWith(normalizedLocal)) {
                 // Strip the local prefix, then prepend the remote base.
-                // Resulting relative path must NOT have a leading slash.
-                const rel = vscodePath.slice(local.length).replace(/\\/g, '/').replace(/^\//, '');
+                // WinCC OA always uses forward slashes for script paths.
+                const rel = normalizedPath
+                    .slice(normalizedLocal.length)
+                    .split(path.sep)
+                    .join('/')
+                    .replace(/^\//, '');
                 const cleanRemote = remote.replace(/\/$/, '');
                 return cleanRemote ? `${cleanRemote}/${rel}` : rel;
             }
@@ -252,7 +258,10 @@ export class WinCCDebugSession extends DebugSession {
 
     /** Map a WinCC OA remote path back to the VS Code local path */
     private toVSCodePath(wccoaPath: string): string {
-        const isAbsolute = wccoaPath.startsWith('/') || /^[A-Za-z]:[/\\]/.test(wccoaPath);
+        const isAbsolute =
+            wccoaPath.startsWith('/') ||
+            /^[A-Za-z]:[/\\]/.test(wccoaPath) ||
+            wccoaPath.startsWith('\\\\');
 
         // WinCC OA bt returns bare filenames for library files (e.g. "debugger_lib.ctl"
         // instead of the full path).  Use the cached info libs path which contains the
@@ -273,11 +282,11 @@ export class WinCCDebugSession extends DebugSession {
                 if (isAbsolute) {
                     return wccoaPath;
                 }
-                return local.replace(/\/$/, '') + '/' + wccoaPath.replace(/^\//, '');
+                return path.join(local, wccoaPath);
             }
             if (wccoaPath.startsWith(remote + '/') || wccoaPath === remote) {
                 const rel = wccoaPath.slice(remote.length).replace(/^\//, '');
-                return local.replace(/\/$/, '') + '/' + rel;
+                return path.join(local, rel);
             }
         }
         return wccoaPath;
@@ -428,7 +437,7 @@ export class WinCCDebugSession extends DebugSession {
                 const funcName = gdbMatch[2];
                 const filePath = this.toVSCodePath(gdbMatch[3].trim());
                 const lineNum = parseInt(gdbMatch[4], 10);
-                const fileName = filePath.split('/').pop() ?? filePath;
+                const fileName = path.basename(filePath);
                 frames.push(
                     new StackFrame(frameId, funcName, new Source(fileName, filePath), lineNum, 0),
                 );
@@ -441,7 +450,7 @@ export class WinCCDebugSession extends DebugSession {
                 const funcName = wcMatch[1].trim();
                 const filePath = this.toVSCodePath(wcMatch[2].trim());
                 const lineNum = parseInt(wcMatch[3], 10);
-                const fileName = filePath.split('/').pop() ?? filePath;
+                const fileName = path.basename(filePath);
                 frames.push(
                     new StackFrame(
                         frames.length,
@@ -501,7 +510,13 @@ export class WinCCDebugSession extends DebugSession {
                 const valObj = entry.val as Record<string, unknown> | null | undefined;
                 if (valObj && typeof valObj === 'object' && !Array.isArray(valObj)) {
                     const c = this.unwrapValue(valObj);
-                    return new Variable(keyName, c.displayVal, c.varRef, c.indexedVariables, c.namedVariables);
+                    return new Variable(
+                        keyName,
+                        c.displayVal,
+                        c.varRef,
+                        c.indexedVariables,
+                        c.namedVariables,
+                    );
                 }
                 return new Variable(keyName, this.formatScalar(entry.val), 0);
             });
@@ -518,7 +533,13 @@ export class WinCCDebugSession extends DebugSession {
                     const valObj = field.value as Record<string, unknown> | null | undefined;
                     if (valObj && typeof valObj === 'object' && !Array.isArray(valObj)) {
                         const c = this.unwrapValue(valObj);
-                        return new Variable(fieldName, c.displayVal, c.varRef, c.indexedVariables, c.namedVariables);
+                        return new Variable(
+                            fieldName,
+                            c.displayVal,
+                            c.varRef,
+                            c.indexedVariables,
+                            c.namedVariables,
+                        );
                     }
                     return new Variable(fieldName, this.formatScalar(field.value), 0);
                 });
@@ -535,7 +556,13 @@ export class WinCCDebugSession extends DebugSession {
             const children = arr.map((item, i) => {
                 if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
                     const c = this.unwrapValue(item as Record<string, unknown>);
-                    return new Variable(`[${i}]`, c.displayVal, c.varRef, c.indexedVariables, c.namedVariables);
+                    return new Variable(
+                        `[${i}]`,
+                        c.displayVal,
+                        c.varRef,
+                        c.indexedVariables,
+                        c.namedVariables,
+                    );
                 }
                 // Defensive fallback: plain primitive in array
                 return new Variable(`[${i}]`, this.formatScalar(item), 0);
@@ -1014,7 +1041,9 @@ export class WinCCDebugSession extends DebugSession {
                 const cached = this.libIndexCache.get(scriptBasename.toLowerCase());
                 if (cached) {
                     // Library BPs were set by reapplyAllBreakpoints — report verified
-                    this.log(`Library "${scriptBasename}" known (libId=${cached.libId}) — BPs verified`);
+                    this.log(
+                        `Library "${scriptBasename}" known (libId=${cached.libId}) — BPs verified`,
+                    );
                     this.pendingBpRequests.delete(sourcePath);
                     response.body = {
                         breakpoints: requestedBps.map((bp) => new Breakpoint(true, bp.line)),
@@ -1023,7 +1052,9 @@ export class WinCCDebugSession extends DebugSession {
                     return;
                 }
 
-                this.log(`Script "${scriptBasename}" not in info scripts — storing as pending (library?)`);
+                this.log(
+                    `Script "${scriptBasename}" not in info scripts — storing as pending (library?)`,
+                );
                 const bps = requestedBps.map((bp) => {
                     const b = new Breakpoint(false, bp.line);
                     return { bp: b, line: bp.line };
@@ -1131,9 +1162,7 @@ export class WinCCDebugSession extends DebugSession {
 
                     // Library found via info libs — set all BPs using the correct libId
                     this.pendingBpRequests.delete(sourcePath);
-                    this.log(
-                        `Pending lib "${scriptBasename}" resolved (libId=${cached.libId})`,
-                    );
+                    this.log(`Pending lib "${scriptBasename}" resolved (libId=${cached.libId})`);
                     for (const { bp, line } of bpList) {
                         const ctxId = [...this.scriptIdToPath.keys()][0] ?? 0;
                         const cmd = `breakpoint ${JSON.stringify({ scriptId: ctxId, scopeId: 0, lib: cached.libId, line })}`;
@@ -1143,7 +1172,9 @@ export class WinCCDebugSession extends DebugSession {
                                 if (res[0] === 'breakpoint set') {
                                     bp.verified = true;
                                     this.sendEvent(new BreakpointEvent('changed', bp));
-                                    this.log(`Pending lib BP verified: ${scriptBasename}:${line} (lib:${cached.libId})`);
+                                    this.log(
+                                        `Pending lib BP verified: ${scriptBasename}:${line} (lib:${cached.libId})`,
+                                    );
                                 }
                             })
                             .catch(() => {});
@@ -1220,10 +1251,13 @@ export class WinCCDebugSession extends DebugSession {
         if (this.client?.isConnected()) {
             this.pendingStopReason = 'step';
             this.attachToStopContext(this.client)
-                .catch((e: Error) => { this.log(`attachToStopContext error: ${e.message}`); })
+                .catch((e: Error) => {
+                    this.log(`attachToStopContext error: ${e.message}`);
+                })
                 .then(() => {
-                    return this.client?.sendCommand('step over')
-                        .catch((e: Error) => { this.log(`step over error: ${e.message}`); });
+                    return this.client?.sendCommand('step over').catch((e: Error) => {
+                        this.log(`step over error: ${e.message}`);
+                    });
                 });
         }
     }
@@ -1243,10 +1277,13 @@ export class WinCCDebugSession extends DebugSession {
         if (this.client?.isConnected()) {
             this.pendingStopReason = 'step';
             this.attachToStopContext(this.client)
-                .catch((e: Error) => { this.log(`attachToStopContext error: ${e.message}`); })
+                .catch((e: Error) => {
+                    this.log(`attachToStopContext error: ${e.message}`);
+                })
                 .then(() => {
-                    return this.client?.sendCommand('step in')
-                        .catch((e: Error) => { this.log(`step in error: ${e.message}`); });
+                    return this.client?.sendCommand('step in').catch((e: Error) => {
+                        this.log(`step in error: ${e.message}`);
+                    });
                 });
         }
     }
@@ -1266,10 +1303,13 @@ export class WinCCDebugSession extends DebugSession {
         if (this.client?.isConnected()) {
             this.pendingStopReason = 'step';
             this.attachToStopContext(this.client)
-                .catch((e: Error) => { this.log(`attachToStopContext error: ${e.message}`); })
+                .catch((e: Error) => {
+                    this.log(`attachToStopContext error: ${e.message}`);
+                })
                 .then(() => {
-                    return this.client?.sendCommand('step out')
-                        .catch((e: Error) => { this.log(`step out error: ${e.message}`); });
+                    return this.client?.sendCommand('step out').catch((e: Error) => {
+                        this.log(`step out error: ${e.message}`);
+                    });
                 });
         }
     }
@@ -1331,7 +1371,9 @@ export class WinCCDebugSession extends DebugSession {
                 const result = await this.client.sendCommand('bt', 3000);
                 this.log(`bt raw response: ${JSON.stringify(result)}`);
                 const frames = this.parseStackFrames(result);
-                this.log(`bt parsed frames: ${frames.map((f) => `${f.name} @ ${f.source?.path}:${f.line}`).join(' | ')}`);
+                this.log(
+                    `bt parsed frames: ${frames.map((f) => `${f.name} @ ${f.source?.path}:${f.line}`).join(' | ')}`,
+                );
                 response.body = { stackFrames: frames, totalFrames: frames.length };
             } catch {
                 response.body = { stackFrames: [], totalFrames: 0 };

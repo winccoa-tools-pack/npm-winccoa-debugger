@@ -29,7 +29,6 @@
  */
 
 import { EventEmitter } from 'events';
-import fs from 'fs';
 import path from 'path';
 import {
     getWinCCOAInstallationPathByVersion,
@@ -446,10 +445,7 @@ export class DatapointClient extends EventEmitter {
                 // Context-selection commands like "script N" / "thread N" can also
                 // return stop-format data but must NOT trigger StoppedEvent —
                 // that would cause spurious extra stops on every stackTrace request.
-                if (
-                    DatapointClient.EXEC_CMD_RE.test(pending.cmd) &&
-                    isStopData
-                ) {
+                if (DatapointClient.EXEC_CMD_RE.test(pending.cmd) && isStopData) {
                     this.emit('message', result);
                 }
                 pending.resolve(result);
@@ -559,13 +555,7 @@ export class DatapointClient extends EventEmitter {
      * Located at <install>/javascript/winccoa-manager/index.js
      */
     private resolveManagerPath(): string {
-        // Try the well-known default path first
-        const defaultDir = '/opt/WinCC_OA/3.21/javascript/winccoa-manager';
-        if (fs.existsSync(defaultDir)) {
-            return path.join(defaultDir, 'index.js');
-        }
-
-        // Fall back to npm-winccoa-core for version discovery
+        // Use npm-winccoa-core for cross-platform version discovery
         const versions: string[] = getAvailableWinCCOAVersions();
         if (versions.length === 0) {
             throw new Error(
