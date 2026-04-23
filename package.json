@@ -1,7 +1,7 @@
 {
-  "name": "@winccoa-tools-pack/npm-winccoa-template",
+  "name": "@winccoa-tools-pack/npm-winccoa-debugger",
   "version": "0.2.0",
-  "description": "Template for WinCC OA npm packages",
+  "description": "WinCC OA Debugger – programmatic debugging interface for CTRL scripts",
   "author": "winccoa-tools-pack",
   "license": "MIT",
   "main": "dist/cjs/index.js",
