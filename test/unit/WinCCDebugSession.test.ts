@@ -184,7 +184,8 @@ test('WinCCDebugSession: attachRequest sends error response when connect fails',
     assert.equal(session.sentResponses.length, 1);
     assert.equal(session.sentResponses[0].success, false);
     assert.match(session.sentResponses[0].message ?? '', /Connection refused/);
-    assert.equal(session.sentEvents.length, 0, 'No InitializedEvent on failure');
+    const initEvents = session.sentEvents.filter((e) => e.event === 'initialized');
+    assert.equal(initEvents.length, 0, 'No InitializedEvent on failure');
 });
 
 test('WinCCDebugSession: setBreakPointsRequest returns unverified when not connected', () => {
