@@ -1,80 +1,111 @@
-Business Source License 1.1
+Proprietary Software License Agreement
 
-License text copyright (c) 2024 MariaDB plc, All Rights Reserved.
-"Business Source License" is a trademark of MariaDB plc.
+Copyright (c) 2026 winccoa-tools-pack. All rights reserved.
 
------------------------------------------------------------------------------
+IMPORTANT — READ CAREFULLY BEFORE USING THIS SOFTWARE.
 
-Parameters
+This Proprietary Software License Agreement ("Agreement") is a legal agreement
+between you ("Licensee") and winccoa-tools-pack ("Licensor") for the use of this
+Visual Studio Code extension and all associated files, documentation, and assets
+("Software").
 
-Licensor:             winccoa-tools-pack
+By installing, copying, or otherwise using the Software, you agree to be bound
+by the terms of this Agreement. If you do not agree to these terms, do not
+install or use the Software.
 
-Licensed Work:        WinCC OA Debug Adapter Library
-                      The Licensed Work is (c) 2025-2026 winccoa-tools-pack.
 
-Additional Use Grant: You may make production use of the Licensed Work,
-                      provided that you do not use the Licensed Work with
-                      more than two (2) individuals within a single
-                      organization. For purposes of this license, an
-                      "organization" includes all affiliates and subsidiaries
-                      of a single legal entity.
+1. GRANT OF LICENSE
 
-                      If your organization requires more than two (2)
-                      individuals to use the Licensed Work, you must obtain
-                      a commercial license from the Licensor.
+   The Licensor grants the Licensee a non-exclusive, non-transferable,
+   non-sublicensable, revocable license to install and use the Software solely
+   for its intended purpose within the Visual Studio Code editor, subject to the
+   terms and conditions of this Agreement.
 
-Change Date:          2028-04-12
 
-Change License:       Apache License, Version 2.0
+2. RESTRICTIONS
 
------------------------------------------------------------------------------
+   The Licensee shall NOT:
 
-Terms
+   a) modify, adapt, alter, translate, or create derivative works based on the
+      Software or any part thereof;
 
-The Licensor hereby grants you the right to copy, modify, create derivative
-works, redistribute, and make non-production use of the Licensed Work. The
-Licensor may make an Additional Use Grant, above, permitting limited
-production use.
+   b) reverse engineer, decompile, disassemble, or otherwise attempt to derive
+      the source code of the Software;
 
-Effective on the Change Date, or the fourth anniversary of the first publicly
-available distribution of a specific version of the Licensed Work under this
-License, whichever comes first, the Licensor hereby grants you rights under
-the terms of the Change License, and the rights granted in the paragraph
-above terminate.
+   c) distribute, sublicense, lease, rent, loan, sell, resell, or otherwise
+      transfer the Software or any copy thereof to any third party;
 
-If your use of the Licensed Work does not comply with the requirements
-currently in effect as described in this License, you must purchase a
-commercial license from the Licensor, its affiliated entities, or authorized
-resellers, or you must refrain from using the Licensed Work.
+   d) reproduce or copy the Software except as reasonably necessary for the
+      installation and use permitted under Section 1;
 
-All copies of the original and modified Licensed Work, and derivative works
-of the Licensed Work, are subject to this License. This License applies
-separately for each version of the Licensed Work and the Change Date may vary
-for each version of the Licensed Work released by Licensor.
+   e) remove, alter, or obscure any proprietary notices, labels, or marks on
+      the Software;
 
-You must conspicuously display this License on each original or modified copy
-of the Licensed Work. If you receive the Licensed Work in original or
-modified form from a third party, the terms and conditions set forth in this
-License apply to your use of that work.
+   f) use the Software to develop competing products or services;
 
-Any use of the Licensed Work in violation of this License will automatically
-terminate your rights under this License for the current and all other
-versions of the Licensed Work.
+   g) publish, share, or make publicly available any portion of the Software's
+      source code, algorithms, or internal architecture;
 
-This License does not grant you any right in any trademark or logo of
-Licensor or its affiliates (provided that you may use a trademark or logo of
-Licensor as expressly required by this License).
+   h) use the Software in any manner that violates applicable laws or
+      regulations.
 
-TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
-AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
-EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
-TITLE.
 
------------------------------------------------------------------------------
+3. INTELLECTUAL PROPERTY
 
-Notice
+   The Software and all copies thereof are proprietary to the Licensor and title
+   thereto remains in the Licensor. All applicable rights to patents, copyrights,
+   trademarks, trade secrets, and other intellectual property rights in the
+   Software are and shall remain in the Licensor. The Licensee does not acquire
+   any rights, express or implied, in the Software other than those specified in
+   this Agreement.
 
-The Business Source License (this document, or the "License") is not an Open
-Source license. However, the Licensed Work will eventually be made available
-under an Open Source License, as stated in this License.
+
+4. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. THE LICENSOR DOES NOT
+   WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE OR UNINTERRUPTED.
+
+
+5. LIMITATION OF LIABILITY
+
+   IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY INDIRECT, INCIDENTAL,
+   SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS, DATA,
+   OR USE, ARISING OUT OF OR IN CONNECTION WITH THIS AGREEMENT OR THE USE OF
+   THE SOFTWARE, EVEN IF THE LICENSOR HAS BEEN ADVISED OF THE POSSIBILITY OF
+   SUCH DAMAGES.
+
+
+6. TERMINATION
+
+   a) This Agreement is effective until terminated.
+
+   b) The Licensor may terminate this Agreement at any time if the Licensee
+      breaches any term of this Agreement.
+
+   c) Upon termination, the Licensee must immediately cease all use of the
+      Software and destroy all copies in their possession.
+
+   d) Sections 2, 3, 4, 5, and 7 shall survive termination.
+
+
+7. GOVERNING LAW
+
+   This Agreement shall be governed by and construed in accordance with the laws
+   of the Federal Republic of Germany, without regard to its conflict of laws
+   provisions. Any disputes arising under this Agreement shall be subject to the
+   exclusive jurisdiction of the courts of Leipzig, Germany.
+
+
+8. ENTIRE AGREEMENT
+
+   This Agreement constitutes the entire agreement between the parties with
+   respect to the use of the Software and supersedes all prior or contemporaneous
+   understandings regarding such subject matter.
+
+
+9. CONTACT
+
+   For questions regarding this license, please contact the Licensor through
+   the official GitHub organization: https://github.com/winccoa-tools-pack
