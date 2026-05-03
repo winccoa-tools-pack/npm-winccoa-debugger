@@ -7,7 +7,7 @@ import { printLocalIntegrationTestResult } from '../helpers/integration-teardown
 
 let _lastSpawnResult: ReturnType<typeof spawnSync> | undefined;
 
-test('CLI: "--help" prints usage and exits with code 1', () => {
+test('CLI: "--help" prints usage and exits with code 0', () => {
     const repoRoot = path.resolve(__dirname, '..', '..');
 
     // Prefer the built CJS CLI (matches what users run via the npm bin entry).
@@ -27,8 +27,9 @@ test('CLI: "--help" prints usage and exits with code 1', () => {
     });
     _lastSpawnResult = result;
 
-    assert.equal(result.status, 1);
-    assert.match(result.stderr ?? '', /Usage: winccoa-pnl-xml/);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout ?? '', /winccoa-debug-adapter/);
+    assert.match(result.stdout ?? '', /Usage/);
 });
 
 test.after(() => {

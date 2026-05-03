@@ -1,15 +1,28 @@
 /**
- * WinCC OA UI PNL/XML Converter
+ * WinCC OA Debug Adapter
  *
- * Provides reliable PNL ⇄ XML transformations for WinCC OA UI panels
- * using the WCCOAui manager under the hood.
+ * Main entry point for the debug adapter package.
+ *
+ * This package provides Debug Adapter Protocol (DAP) implementation for debugging
+ * WinCC OA CTRL scripts from VS Code.
+ *
+ * @packageDocumentation
  */
 
-// Types
-export { ConversionDirection, ConversionOptions, ConversionResult } from './types';
+// Export adapter components
+export * from './adapter/index.js';
 
-// Core converter
-export { PnlXmlConverter } from './converter';
+// Export connection components
+export * from './connection/index.js';
 
-// Convenience API
-export { pnlToXml, xmlToPnl } from './api';
+// Export protocol components
+export * from './protocol/index.js';
+
+// Export utilities
+export * from './utils/index.js';
+
+// Export types
+export * from './types/index.js';
+
+// Version
+export const VERSION = '0.1.0';

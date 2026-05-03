@@ -1,202 +1,514 @@
 #!/usr/bin/env node
-
-import { PnlXmlConverter } from './converter';
-import { ConversionDirection } from './types';
-import type { ConversionOptions } from './types';
-
 /**
- * CLI exit codes.
+ * CLI for WinCC OA Debug Adapter
+ *
+ * Usage:
+ *   winccoa-debug-adapter --project DevEnv3.21 --system System1 --manager ctrl:5
+ *   winccoa-debug-adapter --stdio          # DAP over stdin/stdout (no bootstrap)
+ *   winccoa-debug-adapter --tcp-port 4711  # DAP over TCP (started via bootstrap.js)
+ *   winccoa-debug-adapter --repl           # Interactive REPL (must be started via bootstrap.js)
  */
-const EXIT_OK = 0;
-const EXIT_USAGE = 1;
-const EXIT_CONVERSION_FAILED = 2;
 
-/**
- * Print usage information to stderr.
- */
-function printUsage(): void {
-    const bin = 'winccoa-pnl-xml';
-    process.stderr.write(
-        [
-            '',
-            `Usage: ${bin} <command> [options]`,
-            '',
-            'Commands:',
-            '  convert pnl-to-xml <path>   Convert .pnl panel(s) to XML',
-            '  convert xml-to-pnl <path>   Convert XML file(s) back to .pnl',
-            '',
-            'Options:',
-            '  -v, --version <ver>   WinCC OA version (e.g. 3.20)  [required]',
-            '  -c, --config <path>   WinCC OA project config file',
-            '  -o, --overwrite       Overwrite existing output files',
-            '  -t, --timeout <ms>    Process timeout in milliseconds (default: 60000)',
-            '  -h, --help            Show this help message',
-            '',
-            'Examples:',
-            `  ${bin} convert pnl-to-xml panels/myPanel.pnl -v 3.20`,
-            `  ${bin} convert xml-to-pnl panels/myPanel.xml -v 3.20 -o`,
-            `  ${bin} convert pnl-to-xml panels/ -v 3.20 --timeout 120000`,
-            '',
-        ].join('\n'),
-    );
+import * as net from 'net';
+import * as readline from 'readline';
+import { DatapointClient, DatapointConfig } from './connection/DatapointClient';
+import { WinCCDebugSession } from './adapter/WinCCDebugSession';
+
+interface CLIArgs {
+    host?: string;
+    port?: number;
+    project?: string; // WinCC OA project name for -proj arg (e.g. DevEnv3.21)
+    system?: string; // WinCC OA system name for DP prefix (e.g. System1)
+    manager?: string; // Format: "ctrl:5" — the CTRL manager to debug (not the adapter's own number)
+    adapterNum?: number; // Adapter's own manager number (default 99)
+    user?: string; // WinCC OA username
+    pass?: string; // WinCC OA password
+    stdio?: boolean;
+    tcpPort?: number; // DAP over TCP (used when started via bootstrap.js)
+    testConnect?: boolean;
+    testEcho?: boolean; // Test round-trip against simple TestEcho_1 DP (no debug DP needed)
+    repl?: boolean; // Interactive REPL mode for manual protocol testing
 }
 
-/**
- * Minimal argument parser.
- * Returns the parsed CLI options or null when the input is invalid.
- */
-interface ParsedArgs {
-    direction: ConversionDirection;
-    inputPath: string;
-    version: string;
-    configPath?: string;
-    overwrite: boolean;
-    timeout?: number;
-}
+function parseArgs(args: string[]): CLIArgs {
+    const result: CLIArgs = {};
 
-function parseArgs(argv: string[]): ParsedArgs | null {
-    // Strip node + script path
-    const args = argv.slice(2);
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
 
-    if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
-        return null;
-    }
-
-    // Expect: convert <pnl-to-xml|xml-to-pnl> <path> [options]
-    if (args[0] !== 'convert') {
-        process.stderr.write(`Error: Unknown command "${args[0]}". Expected "convert".\n`);
-        return null;
-    }
-
-    const subCommand = args[1];
-    let direction: ConversionDirection;
-
-    if (subCommand === 'pnl-to-xml') {
-        direction = ConversionDirection.PNL_TO_XML;
-    } else if (subCommand === 'xml-to-pnl') {
-        direction = ConversionDirection.XML_TO_PNL;
-    } else {
-        process.stderr.write(
-            `Error: Unknown sub-command "${subCommand}". Expected "pnl-to-xml" or "xml-to-pnl".\n`,
-        );
-        return null;
-    }
-
-    const inputPath = args[2];
-    if (!inputPath || inputPath.startsWith('-')) {
-        process.stderr.write('Error: Missing input path.\n');
-        return null;
-    }
-
-    let version = '';
-    let configPath: string | undefined;
-    let overwrite = false;
-    let timeout: number | undefined;
-
-    // Parse remaining flags
-    let i = 3;
-    while (i < args.length) {
-        const flag = args[i];
-        switch (flag) {
-            case '-v':
-            case '--version':
-                version = args[++i] ?? '';
+        switch (arg) {
+            case '--host':
+                result.host = args[++i];
                 break;
-            case '-c':
-            case '--config':
-                configPath = args[++i] ?? '';
+            case '--port':
+                result.port = parseInt(args[++i], 10);
                 break;
-            case '-o':
-            case '--overwrite':
-                overwrite = true;
+            case '--project':
+                result.project = args[++i];
                 break;
-            case '-t':
-            case '--timeout': {
-                const raw = args[++i] ?? '';
-                const parsed = Number(raw);
-                if (isNaN(parsed) || parsed <= 0) {
-                    process.stderr.write(`Error: Invalid timeout value "${raw}".\n`);
-                    return null;
-                }
-                timeout = parsed;
+            case '--system':
+                result.system = args[++i];
                 break;
-            }
-            default:
-                process.stderr.write(`Error: Unknown option "${flag}".\n`);
-                return null;
+            case '--manager':
+                result.manager = args[++i];
+                break;
+            case '--adapter-num':
+                result.adapterNum = parseInt(args[++i], 10);
+                break;
+            case '--user':
+                result.user = args[++i];
+                break;
+            case '--pass':
+                result.pass = args[++i];
+                break;
+            case '--stdio':
+                result.stdio = true;
+                break;
+            case '--tcp-port':
+                result.tcpPort = parseInt(args[++i], 10);
+                break;
+            case '--test-connect':
+                result.testConnect = true;
+                break;
+            case '--test-echo':
+                result.testEcho = true;
+                break;
+            case '--repl':
+                result.repl = true;
+                break;
+            case '--help':
+            case '-h':
+                printUsage();
+                process.exit(0);
         }
-        i++;
     }
 
-    if (!version) {
-        process.stderr.write('Error: WinCC OA version is required (-v / --version).\n');
-        return null;
+    return result;
+}
+
+function printUsage() {
+    process.stdout.write(`
+WinCC OA Debug Adapter
+
+Usage:
+  winccoa-debug-adapter [options]
+
+Options:
+  --project <name>          WinCC OA project name (e.g. DevEnv3.21)
+  --system <name>           WinCC OA system name for DP prefix (default: System1)
+  --host <host>             WinCC OA host (default: localhost)
+  --port <port>             WinCC OA dist port (default: 4999)
+  --manager <type:num>      Manager to debug — its debug DPs are read (e.g., ctrl:5)
+  --adapter-num <num>       This adapter's own manager number (default: 99)
+  --stdio                   Run DAP server on stdin/stdout (no bootstrap)
+  --tcp-port <port>         Run DAP server on TCP port (use with bootstrap.js)
+  --test-connect            Test WinCC OA connection, print DP info, and exit
+  --repl                    Interactive REPL: connect and send debug commands manually
+  --help, -h                Show this help
+
+Examples (direct invocation — injects connection args automatically):
+  # Interactive REPL against CTRL manager 5:
+  node dist/cjs/cli.js --project DevEnv3.21 --manager ctrl:5 --repl
+
+  # Quick connection test:
+  node dist/cjs/cli.js --project DevEnv3.21 --manager ctrl:5 --test-connect
+
+Examples (via bootstrap.js — WinCC OA connection already established):
+  /opt/WinCC_OA/3.21/bin/bootstrap.js -PROJ DevEnv3.21 -pmonIndex 99 \\
+    node dist/cjs/cli.js --repl --manager ctrl:5
+`);
+}
+
+/** * Echo-DP round-trip test.
+ *
+ * Connects to WinCC OA, subscribes to TestEcho_1.Output, writes a payload to
+ * TestEcho_1.Input, and waits for the echo server CTL script to reflect it back.
+ * This verifies that dpSetWait + dpConnect callbacks work correctly from Node.js
+ * WITHOUT needing the debug DP protocol.
+ *
+ * Prerequisite: test_echo_server.ctl must be running as a WinCC OA manager.
+ * progs entry:  WCCOActrl | manual | 30 | 3 | 1 | -num 6 test_echo_server.ctl
+ */
+async function runTestEcho(config: DatapointConfig): Promise<void> {
+    const system = config.system ? config.system + ':' : '';
+    const inputDpe = `${system}TestEcho_1.Input`;
+    const outputDpe = `${system}TestEcho_1.Output`;
+
+    process.stderr.write('WinCC OA Debug Adapter - Echo Round-Trip Test\n');
+    process.stderr.write(`  Input  DPE: ${inputDpe}\n`);
+    process.stderr.write(`  Output DPE: ${outputDpe}\n\n`);
+
+    // We connect directly to WinCC OA using the same mechanism as DatapointClient,
+    // but using a minimal inline setup so we can subscribe to arbitrary DPEs.
+    const client = new DatapointClient(config);
+
+    // Temporarily override: subscribe to Output instead of .Result
+    // We do this by creating a second client pointed at the echo DP directly.
+    // Simpler: just re-use the existing DatapointClient with a fake managerType
+    // that results in the correct DP name.  Instead, use the winccoa-manager
+    // directly via the client's internal (we can access it via test-connect pattern).
+
+    // Since DatapointClient only exposes sendCommand on the debug DP, we build a
+    // minimal standalone test using the winccoa-manager directly:
+    await client.connect(); // establishes the WinccoaManager connection
+
+    // Access the internal api via a cast — for test purposes only
+
+    const api = (client as any).api as {
+        dpConnect(
+            cb: (names: string[], values: any[]) => void,
+            dpe: string,
+            answer?: boolean,
+        ): number;
+        dpSetWait(dpe: string, value: any): Promise<void>;
+        dpDisconnect(id: number): void;
+    };
+
+    process.stderr.write('✓ Connected\n');
+
+    // Subscribe to Output
+    let resolveEcho: (v: string) => void;
+    let rejectEcho: (e: Error) => void;
+    const echoPromise = new Promise<string>((res, rej) => {
+        resolveEcho = res;
+        rejectEcho = rej;
+    });
+
+    const subId = api.dpConnect(
+        (names, values) => {
+            process.stderr.write(
+                `[echo] dpConnect callback: names=${JSON.stringify(names)} values=${JSON.stringify(values)}\n`,
+            );
+            const val = values[0];
+            if (val && val !== '' && val !== '{}') {
+                resolveEcho!(String(val));
+            }
+        },
+        outputDpe,
+        false,
+    );
+
+    if (subId < 0) {
+        process.stderr.write(`✗ dpConnect failed for "${outputDpe}" (id=${subId})\n`);
+        process.stderr.write(
+            '  → Is test_echo_server.ctl running? (progs: -num 6 test_echo_server.ctl)\n',
+        );
+        process.exit(1);
+    }
+    process.stderr.write(`✓ Subscribed to ${outputDpe} (subId=${subId})\n`);
+
+    // Send payload to Input
+    const id = `${Date.now()}-echo-test`;
+    const payload = JSON.stringify({ id, echo: 'hello from Node.js' });
+
+    process.stderr.write(`\nSending to ${inputDpe}: ${payload}\n`);
+    try {
+        await api.dpSetWait(inputDpe, payload);
+        process.stderr.write('✓ dpSetWait confirmed\n');
+    } catch (e) {
+        process.stderr.write(`✗ dpSetWait failed: ${(e as Error).message}\n`);
+        process.exit(1);
     }
 
-    return { direction, inputPath, version, configPath, overwrite, timeout };
+    // Wait for echo (max 5s)
+    const timer = setTimeout(() => rejectEcho!(new Error('Echo timeout after 5000ms')), 5000);
+    try {
+        const response = await echoPromise;
+        clearTimeout(timer);
+        process.stderr.write(`\n✓ Echo received: ${response}\n`);
+
+        const parsed = JSON.parse(response) as { id: string; echoed: string };
+        if (parsed.id === id && parsed.echoed === 'hello from Node.js') {
+            process.stderr.write(
+                '✓ Round-trip complete — dpSetWait + dpConnect works correctly!\n',
+            );
+        } else {
+            process.stderr.write(`✗ Unexpected response content: ${response}\n`);
+        }
+    } catch (e) {
+        process.stderr.write(`✗ ${(e as Error).message}\n`);
+        process.stderr.write('  → Is test_echo_server.ctl running?\n');
+        process.exit(1);
+    } finally {
+        api.dpDisconnect(subId);
+        await client.disconnect();
+    }
+    process.exit(0);
+}
+
+/** * Quick connection test — connect, print the debug DP name, send "info scripts",
+ * and exit. Useful to verify that the DP protocol works before using VS Code.
+ */
+async function runTestConnect(config: DatapointConfig): Promise<void> {
+    process.stderr.write('WinCC OA Debug Adapter - Connection Test\n');
+    process.stderr.write('Target DP: ' + buildDebugDpName(config) + '\n\n');
+
+    const client = new DatapointClient(config);
+
+    client.on('connected', () => {
+        process.stderr.write('✓ Connected to WinCC OA\n');
+        process.stderr.write('  Debug datapoint: ' + client.getDebugDp() + '\n');
+    });
+    client.on('error', (err) => {
+        process.stderr.write('Error: ' + (err as Error).message + '\n');
+    });
+    client.on('message', (msg) => {
+        process.stderr.write('[unsolicited] ' + JSON.stringify(msg) + '\n');
+    });
+
+    try {
+        await client.connect();
+
+        process.stderr.write('\nQuerying loaded scripts...\n');
+        const scripts = await client.sendCommand('info scripts', 5000);
+        process.stderr.write('info scripts result:\n');
+        scripts.forEach((l) => process.stderr.write('  ' + l + '\n'));
+
+        process.stderr.write('\nQuerying breakpoints...\n');
+        const bps = await client.sendCommand('info breakpoints', 5000);
+        process.stderr.write('info breakpoints result:\n');
+        bps.forEach((l) => process.stderr.write('  ' + l + '\n'));
+
+        await client.disconnect();
+        process.stderr.write('\n✓ Test completed successfully\n');
+        process.exit(0);
+    } catch (err) {
+        process.stderr.write('✗ Failed: ' + (err as Error).message + '\n');
+        process.exit(1);
+    }
 }
 
 /**
- * Main CLI entry point.
+ * Interactive REPL — connect to WinCC OA and read debug commands from stdin.
+ *
+ * Unsolicited messages (breakpoint hits, etc.) are printed immediately.
+ * Type "help" for available commands, "quit" or Ctrl-D to exit.
+ *
+ * Example usage (via bootstrap.js):
+ *   > info scripts
+ *   > breakpoint {"scriptId": 1, "line": 24}
+ *   > continue
+ *   > info locals
+ *   > bt
  */
-async function main(): Promise<void> {
-    const parsed = parseArgs(process.argv);
+async function runRepl(config: DatapointConfig): Promise<void> {
+    process.stderr.write('WinCC OA Debug Adapter — Interactive REPL\n');
+    process.stderr.write('Target DP: ' + buildDebugDpName(config) + '\n');
+    process.stderr.write('Connecting...\n\n');
 
-    if (!parsed) {
-        printUsage();
-        process.exitCode = EXIT_USAGE;
+    const client = new DatapointClient(config);
+
+    client.on('connected', () => {
+        process.stderr.write('✓ Connected. Debug DP: ' + client.getDebugDp() + '\n\n');
+        process.stderr.write(
+            'Commands: info scripts | info breakpoints | info threads | info locals\n',
+        );
+        process.stderr.write(
+            '          breakpoint {"scriptId":N,"line":M} | continue | next | step\n',
+        );
+        process.stderr.write('          bt | finish | interrupt | print <expr> | quit\n\n');
+    });
+
+    client.on('disconnected', () => {
+        process.stderr.write('\n✗ Disconnected from WinCC OA\n');
+        process.exit(0);
+    });
+
+    client.on('error', (err) => {
+        process.stderr.write('Error: ' + (err as Error).message + '\n');
+    });
+
+    // Print breakpoint hits and other unsolicited stop events immediately,
+    // interrupting any ongoing readline prompt.
+    client.on('message', (msg: string[]) => {
+        process.stderr.write('\n[STOP EVENT] ' + JSON.stringify(msg) + '\n');
+        if (msg[0]?.startsWith('line: ')) {
+            const line = msg[0].slice(6);
+            const thread = msg.find((m) => m.startsWith('ThreadId:')) ?? '';
+            process.stderr.write(`  → Stopped at line ${line}  ${thread}\n`);
+        }
+        process.stderr.write('> ');
+    });
+
+    await client.connect();
+
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stderr,
+        terminal: true,
+        prompt: '> ',
+    });
+
+    rl.prompt();
+
+    rl.on('line', async (line) => {
+        const cmd = line.trim();
+        if (!cmd) {
+            rl.prompt();
+            return;
+        }
+        if (cmd === 'quit' || cmd === 'exit') {
+            await client.disconnect();
+            rl.close();
+            process.exit(0);
+        }
+        if (cmd === 'help') {
+            process.stderr.write('Available commands:\n');
+            process.stderr.write(
+                '  info scripts              — list loaded CTL scripts with their IDs\n',
+            );
+            process.stderr.write('  info breakpoints          — list active breakpoints\n');
+            process.stderr.write('  info threads              — list CTRL threads\n');
+            process.stderr.write(
+                '  info locals               — show local variables at current stop\n',
+            );
+            process.stderr.write('  breakpoint {"scriptId":N,"line":M}  — set breakpoint\n');
+            process.stderr.write('  continue                  — resume execution\n');
+            process.stderr.write('  next                      — step over\n');
+            process.stderr.write('  step                      — step into\n');
+            process.stderr.write('  finish                    — step out\n');
+            process.stderr.write('  interrupt                 — pause running script\n');
+            process.stderr.write('  bt                        — show call stack\n');
+            process.stderr.write('  print <expr>              — evaluate expression\n');
+            process.stderr.write('  quit / exit               — disconnect and exit\n');
+            rl.prompt();
+            return;
+        }
+
+        try {
+            const result = await client.sendCommand(cmd, 10000);
+            if (result.length === 0) {
+                process.stderr.write('(empty response)\n');
+            } else {
+                result.forEach((l) => process.stderr.write('  ' + l + '\n'));
+            }
+        } catch (err) {
+            process.stderr.write('Error: ' + (err as Error).message + '\n');
+        }
+
+        rl.prompt();
+    });
+
+    rl.on('close', async () => {
+        await client.disconnect().catch(() => {});
+        process.exit(0);
+    });
+}
+
+/** Build the debug DP name string (for display only). */
+function buildDebugDpName(config: DatapointConfig): string {
+    const prefix = config.system ? config.system + ':' : '';
+    return `${prefix}_CtrlDebug_${config.managerType}_${config.managerNumber}.*`;
+}
+
+function runStdioMode(): void {
+    // Start the DAP session: reads from stdin, writes to stdout.
+    // Only use this when NOT started via bootstrap.js (stdout is clean).
+    WinCCDebugSession.run(WinCCDebugSession);
+}
+
+function runTcpMode(tcpPort: number): void {
+    // When started via bootstrap.js, process.argv is shifted to just ['debugAdapter.js'].
+    // The @vscode/debugadapter runDebugAdapter() does process.argv.slice(2), so pushing
+    // '--server=PORT' at index 1 would be skipped. Instead, use net.createServer directly.
+    process.stderr.write(`[winccoa-debugger] Starting TCP server on port ${tcpPort}\n`);
+    net.createServer((socket) => {
+        process.stderr.write('[winccoa-debugger] Client connected\n');
+        socket.on('end', () => {
+            process.stderr.write('[winccoa-debugger] Client disconnected\n');
+        });
+        const session = new WinCCDebugSession();
+        session.setRunAsServer(true);
+        session.start(socket, socket);
+    }).listen(tcpPort, '127.0.0.1', () => {
+        process.stderr.write(`[winccoa-debugger] TCP server listening on 127.0.0.1:${tcpPort}\n`);
+    });
+}
+
+async function main() {
+    process.stderr.write(
+        '[winccoa-debugger] Starting, process.argv: ' + process.argv.join(' ') + '\n',
+    );
+
+    // bootstrap.js shifts process.argv so argv[0] = our script, argv[1] = first flag.
+    // Normal invocation: argv[0]=node, argv[1]=script, argv[2+]=flags.
+    const flagStart = process.argv.findIndex((a) => a.startsWith('--') || a === '-h');
+    const args = parseArgs(flagStart >= 0 ? process.argv.slice(flagStart) : []);
+
+    process.stderr.write('[winccoa-debugger] Parsed args: ' + JSON.stringify(args) + '\n');
+
+    if (args.stdio) {
+        runStdioMode();
         return;
     }
 
-    const options: ConversionOptions = {
-        version: parsed.version,
-        inputPath: parsed.inputPath,
-        configPath: parsed.configPath,
-        overwrite: parsed.overwrite,
-        timeout: parsed.timeout,
+    if (args.tcpPort || !args.project) {
+        // Started via bootstrap.js — WinCC OA connection is already established.
+        // Use explicit --tcp-port if given, otherwise fall back to hardcoded default 7474.
+        runTcpMode(args.tcpPort ?? 7474);
+        return;
+    }
+
+    // Parse the target manager (whose debug DPs we read).
+    let managerType: DatapointConfig['managerType'] = 'CTRL';
+    let managerNumber = 1;
+    if (args.manager) {
+        const parts = args.manager.split(':');
+        managerType = parts[0].toUpperCase() as DatapointConfig['managerType'];
+        managerNumber = parseInt(parts[1] ?? '1', 10);
+    }
+
+    // If --project is given, we're running directly (not via bootstrap.js) and need
+    // to inject connectionArgs so the native addon can authenticate with WinCC OA.
+    // If --project is NOT given, bootstrap.js already set up the connection.
+    const adapterNum = args.adapterNum ?? 99;
+    const needsConnectionArgs = !!args.project;
+
+    const config: DatapointConfig = {
+        host: args.host || 'localhost',
+        port: args.port || 4999,
+        system: args.system || 'System1',
+        managerType,
+        managerNumber,
+        ...(needsConnectionArgs
+            ? {
+                  connectionArgs: [
+                      '-proj',
+                      args.project!,
+                      '-host',
+                      args.host || 'localhost',
+                      '-port',
+                      String(args.port || 4999),
+                      '-num',
+                      String(adapterNum),
+                      '-m',
+                      'jscript',
+                      ...(args.user ? ['-user', args.user, '-pass', args.pass ?? ''] : []),
+                  ],
+              }
+            : {}),
     };
 
-    const directionLabel =
-        parsed.direction === ConversionDirection.PNL_TO_XML ? 'PNL → XML' : 'XML → PNL';
-
-    process.stderr.write(`Converting ${directionLabel}: ${parsed.inputPath}\n`);
-
-    try {
-        const converter = new PnlXmlConverter();
-        const result = await converter.convert(options, parsed.direction);
-
-        if (result.stdout) {
-            process.stdout.write(result.stdout);
-        }
-        if (result.stderr) {
-            process.stderr.write(result.stderr);
-        }
-
-        if (result.success) {
-            process.stderr.write('Conversion completed successfully.\n');
-            process.exitCode = EXIT_OK;
-        } else {
-            process.stderr.write(`Conversion failed with exit code ${result.exitCode}.\n`);
-            process.exitCode = EXIT_CONVERSION_FAILED;
-        }
-    } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`Error: ${message}\n`);
-        process.exitCode = EXIT_CONVERSION_FAILED;
+    if (args.testConnect) {
+        await runTestConnect(config);
+        return;
     }
+
+    if (args.testEcho) {
+        await runTestEcho(config);
+        return;
+    }
+
+    if (args.repl) {
+        await runRepl(config);
+        return;
+    }
+
+    // Default: start interactive REPL (direct invocation with connectionArgs).
+    await runRepl(config);
 }
 
-// Auto-run only when invoked directly (not when imported for testing)
-const isDirectRun =
-    process.argv[1] &&
-    (process.argv[1].endsWith('cli.js') ||
-        process.argv[1].endsWith('cli.ts') ||
-        process.argv[1].endsWith('cli.cjs') ||
-        process.argv[1].endsWith('cli.mjs'));
-
-if (isDirectRun) {
-    main();
-}
-
-// Export for testing
-export { parseArgs, printUsage, main };
+main().catch((err) => {
+    process.stderr.write('Fatal error: ' + String(err) + '\n');
+    process.exit(1);
+});
