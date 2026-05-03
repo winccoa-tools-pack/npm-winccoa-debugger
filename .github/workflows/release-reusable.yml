@@ -141,6 +141,14 @@ jobs:
           echo "📦 Repacking as: dist/$CLEAN_NAME"
           tar -czf "dist/$CLEAN_NAME" -C staging package
 
+          # Extract debugAdapter.js for direct release asset
+          if [ -f "staging/package/dist/debugAdapter.js" ]; then
+            cp staging/package/dist/debugAdapter.js dist/debugAdapter.js
+            echo "✅ Extracted dist/debugAdapter.js for release asset"
+          else
+            echo "⚠️  staging/package/dist/debugAdapter.js not found — skipping"
+          fi
+
           # Verify the new tarball
           echo "📋 Contents of new tarball:"
           tar -tzf "dist/$CLEAN_NAME" | head -20 || true
@@ -179,7 +187,9 @@ jobs:
             ### ✅ Tested Artifact
             - Published from tested pre-release asset: `${{ needs.precheck.outputs.prerelease_tag }}`
             - Published to npm with dist-tag: `latest`
-          files: "dist/*.tgz"
+          files: |
+            dist/*.tgz
+            dist/debugAdapter.js
           draft: false
           prerelease: false
           generate_release_notes: true

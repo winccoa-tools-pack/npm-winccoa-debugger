@@ -1,14 +1,6 @@
 name: Pre-Release (Develop)
 
 on:
-    workflow_run:
-        workflows:
-            - "CI/CD Pipeline"
-            - "Integration Tests - WinCC OA"
-        types:
-            - completed
-        branches:
-            - develop
     workflow_dispatch:
         inputs:
             pre_release_type:
@@ -209,6 +201,8 @@ jobs:
                   tag_name: "v${{ steps.release.outputs.version }}"
                   name: "🧪 Pre-Release v${{ steps.release.outputs.version }}"
                   target_commitish: develop
+                  files: |
+                      dist/debugAdapter.js
                   body: |
                       ${{ steps.changelog.outputs.changelog }}
 
