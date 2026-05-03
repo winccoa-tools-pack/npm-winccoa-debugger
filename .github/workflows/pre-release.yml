@@ -209,6 +209,8 @@ jobs:
                   tag_name: "v${{ steps.release.outputs.version }}"
                   name: "🧪 Pre-Release v${{ steps.release.outputs.version }}"
                   target_commitish: develop
+                  files: |
+                      dist/debugAdapter.js
                   body: |
                       ${{ steps.changelog.outputs.changelog }}
 
