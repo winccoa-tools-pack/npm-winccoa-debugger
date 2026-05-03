@@ -37,7 +37,7 @@ Die drei Manager-Klassen sind reserviert — die Logik liegt derzeit vollständi
 
 ### Startmodus (Produktion via pmon)
 
-```
+```text
 node | once | 30 | 1 | 0 | debugAdapter.js
 ```
 
@@ -53,14 +53,14 @@ node | once | 30 | 1 | 0 | debugAdapter.js
 ### Kommunikationskanal
 
 | Richtung | Datapoint | Inhalt |
-|---|---|---|
+| --- | --- | --- |
 | VS Code → WinCC OA | `_CtrlDebug_CTRL_N._CtrlDebug.Command` | JSON `{"id":"<uuid>","cmd":"..."}` |
 | WinCC OA → VS Code | `_CtrlDebug_CTRL_N._CtrlDebug.Result` | `["<uuid>","OK",...]` (solicited) oder `["line: N",...]` (unsolicited BP-Hit) |
 
 ### Debug-Commands (korrekte Namen aus `CTRLdebugger.ctl`)
 
 | Befehl | Funktion |
-|---|---|
+| --- | --- |
 | `step over` | Step Over (nächste Zeile auf gleichem Level) |
 | `step in` | Step Into (läuft bis zum nächsten **BP** — nicht Zeile für Zeile!) |
 | `step out` | Step Out (kehrt zurück in Caller-Frame, stoppt an nächster Zeile) |
@@ -97,7 +97,7 @@ pending + emit 'message' + resolve` aus.
 ### WinCC OA 3.21 Step-Semantik (verifiziert)
 
 | Command | Verhalten |
-|---|---|
+| --- | --- |
 | `step over` | Stoppt an **nächster Zeile** (auch ohne gesetzten BP) |
 | `step in` | Läuft bis zum **nächsten gesetzten BP** — nicht Zeile für Zeile! |
 | `step out` | Kehrt aus aktueller Funktion zurück, stoppt an **nächster Zeile** im Caller |
@@ -107,7 +107,7 @@ pending + emit 'message' + resolve` aus.
 
 ### Stopp-Event-Format
 
-```
+```text
 msg[0] = "line: N"               — Zeile des Stopps
 msg[1] = "lib: LibId: -1 ..."    — Lib-Info (libId=-1 = Hauptskript)
 msg[2] = "ScriptId: N"           — numerische Script-ID
@@ -122,7 +122,7 @@ msg[4] = "ThreadId: N (stopped)" — Thread-ID + Status
 ### Zustandsfelder
 
 | Feld | Typ | Bedeutung |
-|---|---|---|
+| --- | --- | --- |
 | `stopState` | `{scriptId, threadId, scopeId, libId?}\|null` | Kontext des letzten Stopps |
 | `pendingStopReason` | `'step'\|'pause'\|null` | In-Flight-Step/Pause → bypasses Spurious-Stop-Filter |
 | `stopOnEntryPending` | `boolean` | DebugBreak() / stopOnEntry wartet noch auf configurationDone |
@@ -185,7 +185,7 @@ queued Event):
 ### Unit-Tests (`test/unit/`)
 
 | Datei | Inhalt |
-|---|---|
+| --- | --- |
 | `WinCCDebugSession.test.ts` | DAP-Handler mit gemocktem DatapointClient |
 | `DatapointClient.test.ts` | DP-Kommunikation, Two-Phase-Response, Regex |
 | `variable-parsing.test.ts` | WinCC OA 3.21 Variablen-Format-Parser inkl. Structs |
@@ -195,7 +195,7 @@ queued Event):
 Laufen als Node-Prozess — kein VS Code Extension-Host erforderlich:
 
 | Datei | Beschreibung |
-|---|---|
+| --- | --- |
 | `debugger-e2e.test.ts` | Grundlegender Attach-Test |
 | `debugger-bp-cycle.test.ts` | BP set/hit/continue Zyklen |
 | `debugger-stop-on-entry.test.ts` | stopOnEntry / DebugBreak()-Modus |
@@ -212,7 +212,7 @@ Die vollständigen E2E-Tests laufen im `vscode-winccoa-debugger` Repo.
 
 ### Fixture-Projekt (`test/fixtures/projects/runnable/`)
 
-```
+```text
 config/
   progs         # CTRL-Manager (-num 2..7) + node debugAdapter.js (once)
   config        # WinCC OA Projektkonfiguration
@@ -298,7 +298,7 @@ Korrekte Commands: `step over` / `step in` / `step out` / `b` / `c`.
 ## Abhängigkeiten
 
 | Paket | Verwendung |
-|---|---|
+| --- | --- |
 | `@winccoa-tools-pack/npm-winccoa-core` | PmonComponent, WinCC OA Versionsdetection |
 | `@vscode/debugadapter` | DAP-Protokoll-Basisklassen |
 | `@vscode/debugprotocol` | DAP-Typen |

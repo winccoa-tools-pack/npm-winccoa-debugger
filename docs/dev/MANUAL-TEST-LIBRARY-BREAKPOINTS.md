@@ -56,7 +56,7 @@ debugging a WinCC OA CTRL script.
 ## Expected Results
 
 | Step | Expected |
-|------|----------|
+| --- | --- |
 | Main BP set | Verified (solid red dot) |
 | Main BP hit | Execution stops at line 14 |
 | Lib BP set | Verified (solid red dot) |
@@ -69,6 +69,7 @@ debugging a WinCC OA CTRL script.
 
 The adapter previously used blind probing (`lib:0, lib:1, … lib:7`) to
 discover library indices. This was:
+
 - **Incorrect**: It used the main script's `scriptId` instead of `-1`
 - **Fragile**: WinCC OA assigns arbitrary numeric LibIds that don't necessarily
   match `#uses` order
