@@ -28,6 +28,41 @@ export function getTestProjectPath(projectName: string): string {
 }
 
 /**
+ * Restores the SQLite databases for a test project from seed files.
+ * Seeds are committed to git in test/fixtures/seeds/sqlite/.
+ * Runtime databases are .gitignore'd and always restored before tests
+ * to guarantee a clean, reproducible state.
+ *
+ * @param projectName Name of the test project (e.g., 'runnable')
+ */
+export function restoreTestDatabase(projectName: string): void {
+    const seedDir = path.resolve(__dirname, '..', 'fixtures', 'seeds', 'sqlite');
+    const dbDir = path.join(getTestProjectPath(projectName), 'db', 'wincc_oa', 'sqlite');
+
+    if (!fs.existsSync(seedDir)) {
+        throw new Error(`SQLite seed directory not found: ${seedDir}`);
+    }
+
+    fs.mkdirSync(dbDir, { recursive: true });
+
+    const seeds = ['config.sqlite', 'ident.sqlite', 'last_alert.sqlite', 'last_value.sqlite'];
+    for (const file of seeds) {
+        const src = path.join(seedDir, file);
+        if (!fs.existsSync(src)) {
+            throw new Error(`SQLite seed file missing: ${src}`);
+        }
+        fs.copyFileSync(src, path.join(dbDir, file));
+    }
+
+    // Remove stale WAL/SHM files from previous runs
+    for (const file of fs.readdirSync(dbDir)) {
+        if (file.endsWith('-shm') || file.endsWith('-wal')) {
+            fs.unlinkSync(path.join(dbDir, file));
+        }
+    }
+}
+
+/**
  * Creates and registers a runnable WinCC OA test project
  * @returns ProjEnvProject instance for the registered test project
  * @throws Error if registration fails
@@ -67,6 +102,9 @@ export async function registerRunnableTestProject(): Promise<ProjEnvProject> {
     project.setVersion(testVersion);
 
     cleanUpProgs(project);
+
+    // Restore SQLite databases from seeds (ensures clean, reproducible state)
+    restoreTestDatabase('runnable');
 
     if (project.isRegistered()) {
         // Ensure pmon is stopped before registration

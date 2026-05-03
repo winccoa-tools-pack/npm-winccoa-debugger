@@ -130,7 +130,9 @@ jobs:
           name: ${{ format('🧪 Pre-Release {0}', steps.meta.outputs.tag) }}
           target_commitish: ${{ inputs.target_branch != '' && inputs.target_branch || github.sha }}
           body: ${{ steps.body.outputs.body }}
-          files: "*.tgz"
+          files: |
+            *.tgz
+            dist/debugAdapter.js
           draft: false
           prerelease: true
           generate_release_notes: true
