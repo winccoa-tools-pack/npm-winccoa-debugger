@@ -39,7 +39,8 @@
     "build:types": "tsc -p tsconfig.build.types.json",
     "build:cjs": "tsc -p tsconfig.build.cjs.json",
     "build:esm": "tsc -p tsconfig.build.esm.json && node scripts/fix-esm-imports.mjs",
-    "build": "npm run build:types && npm run build:cjs && npm run build:esm",
+    "build:bundle": "esbuild dist/cjs/cli.js --bundle --platform=node --format=cjs --external:winccoa-manager --outfile=dist/debugAdapter.js --log-level=info",
+    "build": "npm run build:types && npm run build:cjs && npm run build:esm && npm run build:bundle",
     "compile": "tsc --build",
     "prepublishOnly": "npm run build",
     "lint": "eslint \"src/**/*.ts\"",
@@ -56,13 +57,14 @@
     "ci:integration": "npm ci && npm run build && npm run test:integration"
   },
   "dependencies": {
-    "@winccoa-tools-pack/npm-winccoa-core": "^0.2.6",
     "@vscode/debugadapter": "^1.68.0",
-    "@vscode/debugprotocol": "^1.68.0"
+    "@vscode/debugprotocol": "^1.68.0",
+    "@winccoa-tools-pack/npm-winccoa-core": "^0.2.6"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
     "@types/node": "^25.3.3",
+    "esbuild": "^0.28.0",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.32.0",
