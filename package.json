@@ -1,6 +1,6 @@
 {
   "name": "@winccoa-tools-pack/winccoa-debug-adapter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Debug Adapter Protocol implementation for WinCC OA CTRL debugging",
   "author": "winccoa-tools-pack",
   "license": "BUSL-1.1",
