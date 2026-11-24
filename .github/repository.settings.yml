@@ -30,3 +30,19 @@ topics:
 security:
   enable_vulnerability_alerts: true
   enable_automated_security_fixes: true
+
+auto_approve:
+  dependabot_only: true
+  # List workflow names to target; empty list means any workflow triggered by PRs.
+  workflows:
+    - "CI/CD Pipeline"
+    - "Git Flow Validation"
+    - "PR Labels"
+
+actions_permissions:
+  enabled: true
+  allowed_actions: all
+
+workflow_permissions:
+  default_workflow_permissions: "read"
+  can_approve_pull_request_reviews: true
