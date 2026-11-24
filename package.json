@@ -59,7 +59,7 @@
   "dependencies": {
     "@vscode/debugadapter": "^1.68.0",
     "@vscode/debugprotocol": "^1.68.0",
-    "@winccoa-tools-pack/npm-winccoa-core": "^0.2.6"
+    "@winccoa-tools-pack/npm-winccoa-core": "^2.0.8"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
@@ -69,8 +69,8 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.32.0",
     "globals": "^17.6.0",
-    "markdownlint": "^0.40.0",
-    "markdownlint-cli": "^0.48.0",
+    "markdownlint": "^0.42.2",
+    "markdownlint-cli": "^0.50.1",
     "prettier": "^3.8.3",
     "ts-node": "^10.9.1",
     "tsx": "^4.21.0",
