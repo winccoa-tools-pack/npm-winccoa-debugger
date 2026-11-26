@@ -89,7 +89,7 @@ If you keep these rulesets enabled, ensure your workflows emit these check names
 
 ## Quick Links
 
-• [📦 npm package](https://www.npmjs.com/package/@winccoa-tools-pack/npm-winccoa-debugger)
+• [📦 npm package](https://www.npmjs.com/package/@winccoa-tools-pack/winccoa-debug-adapter)
 
 ---
 
