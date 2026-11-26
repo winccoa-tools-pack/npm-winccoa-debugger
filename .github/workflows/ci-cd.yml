@@ -78,6 +78,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+# you can add more Node.js versions to the matrix if you want to test against multiple versions,
+# but keep in mind that the more versions you add, the longer the CI/CD pipeline will take to complete.
+# which may not be ideal for PRs that require quick feedback.
+# It may also provide costs for GitHub Actions minutes if you are on a paid plan, so be mindful of that.
+#        node-version: [22.x, 24.x, 26.x]
+# therefore I will provide tests only for current node version 
         node-version: [26.x]
     env:
       CI: true
