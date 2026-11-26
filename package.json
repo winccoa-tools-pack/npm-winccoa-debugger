@@ -77,6 +77,9 @@
     "typescript": "^5.2.0",
     "typescript-eslint": "^8.59.1"
   },
+  "overrides": {
+    "katex": "^0.18.2"
+  },
   "config": {
     "winccoaImage": "mpokornyetm/winccoa-tools-pack-npm-winccoa-core:npm-winccoa-core"
   },
