@@ -1,3 +1,3 @@
 # Integration tests
 
-Integration test need installe WinCC OA, or other special tools.
+Integration tests require an installed WinCC OA instance or other special tools.

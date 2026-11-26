@@ -73,7 +73,7 @@ From the Actions tab:
 
 ## Quick Links
 
-• [📦 npm package](https://www.npmjs.com/package/@winccoa-tools-pack/npm-winccoa-ui-pnl-xml)
+• [📦 npm package](https://www.npmjs.com/package/@winccoa-tools-pack/npm-winccoa-debugger)
 
 ---
 
